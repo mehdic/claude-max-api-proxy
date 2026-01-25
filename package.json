@@ -1,12 +1,12 @@
 {
-  "name": "claude-code-cli-provider",
+  "name": "claude-max-api-proxy",
   "version": "1.0.0",
   "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "claude-code-provider": "dist/server/standalone.js"
+    "claude-max-api": "dist/server/standalone.js"
   },
   "scripts": {
     "build": "tsc",
@@ -32,12 +32,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/claude-code-cli-provider"
+    "url": "https://github.com/atalovesyou/claude-max-api-proxy"
   },
   "bugs": {
-    "url": "https://github.com/anthropics/claude-code-cli-provider/issues"
+    "url": "https://github.com/atalovesyou/claude-max-api-proxy/issues"
   },
-  "homepage": "https://github.com/anthropics/claude-code-cli-provider#readme",
+  "homepage": "https://github.com/atalovesyou/claude-max-api-proxy#readme",
   "dependencies": {
     "express": "^4.21.2",
     "uuid": "^11.0.5"
