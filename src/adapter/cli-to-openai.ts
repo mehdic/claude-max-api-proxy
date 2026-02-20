@@ -84,7 +84,7 @@ export function cliResultToOpenai(
         index: 0,
         message: {
           role: "assistant",
-          content: result.result,
+          content: ensureString(result.result),
         },
         finish_reason: "stop",
       },
@@ -102,7 +102,17 @@ export function cliResultToOpenai(
  * Normalize Claude model names to a consistent format
  * e.g., "claude-sonnet-4-5-20250929" -> "claude-sonnet-4"
  */
-function normalizeModelName(model: string): string {
+/**
+ * Defensively convert any value to string to prevent [object Object] in responses
+ */
+function ensureString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
+function normalizeModelName(model: string | undefined): string {
+  if (!model) return "claude-sonnet-4";
   if (model.includes("opus")) return "claude-opus-4";
   if (model.includes("sonnet")) return "claude-sonnet-4";
   if (model.includes("haiku")) return "claude-haiku-4";

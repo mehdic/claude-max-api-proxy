@@ -34,7 +34,7 @@ export interface SubprocessEvents {
   raw: (line: string) => void;
 }
 
-const DEFAULT_TIMEOUT = 300000; // 5 minutes
+const DEFAULT_TIMEOUT = 900000; // 15 minutes (agentic tasks can be long)
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -46,7 +46,7 @@ export class ClaudeSubprocess extends EventEmitter {
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
-    const args = this.buildArgs(prompt, options);
+    const args = this.buildArgs(options);
     const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     return new Promise((resolve, reject) => {
@@ -54,7 +54,7 @@ export class ClaudeSubprocess extends EventEmitter {
         // Use spawn() for security - no shell interpretation
         this.process = spawn("claude", args, {
           cwd: options.cwd || process.cwd(),
-          env: { ...process.env },
+          env: { ...process.env, OPENCLAW_PROXY: "1" },
           stdio: ["pipe", "pipe", "pipe"],
         });
 
@@ -81,7 +81,8 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
-        // Close stdin since we pass prompt as argument
+        // Pass prompt via stdin to avoid E2BIG with large prompts
+        this.process.stdin?.write(prompt);
         this.process.stdin?.end();
 
         console.error(`[Subprocess] Process spawned with PID: ${this.process.pid}`);
@@ -126,8 +127,9 @@ export class ClaudeSubprocess extends EventEmitter {
 
   /**
    * Build CLI arguments array
+   * Note: prompt is passed via stdin to avoid E2BIG errors with large prompts
    */
-  private buildArgs(prompt: string, options: SubprocessOptions): string[] {
+  private buildArgs(options: SubprocessOptions): string[] {
     const args = [
       "--print", // Non-interactive mode
       "--output-format",
@@ -137,8 +139,12 @@ export class ClaudeSubprocess extends EventEmitter {
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
       "--no-session-persistence", // Don't save sessions
-      prompt, // Pass prompt as argument (more reliable than stdin)
     ];
+
+    // Support headless operation without permission prompts
+    if (process.env.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true") {
+      args.push("--dangerously-skip-permissions");
+    }
 
     if (options.sessionId) {
       args.push("--session-id", options.sessionId);

@@ -2,9 +2,9 @@
  * Converts OpenAI chat request format to Claude CLI input
  */
 
-import type { OpenAIChatRequest } from "../types/openai.js";
+import type { OpenAIChatRequest, OpenAIMessageContent } from "../types/openai.js";
 
-export type ClaudeModel = "opus" | "sonnet" | "haiku";
+export type ClaudeModel = "opus" | "sonnet" | "haiku" | string;
 
 export interface CliInput {
   prompt: string;
@@ -17,11 +17,28 @@ const MODEL_MAP: Record<string, ClaudeModel> = {
   "claude-opus-4": "opus",
   "claude-sonnet-4": "sonnet",
   "claude-haiku-4": "haiku",
-  // With provider prefix
+  // 4.5/4.6 generation
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-sonnet-4-5": "claude-sonnet-4-5",
+  "claude-haiku-4-5": "claude-haiku-4-5",
+  // With provider prefix (claude-code-cli/)
   "claude-code-cli/claude-opus-4": "opus",
   "claude-code-cli/claude-sonnet-4": "sonnet",
   "claude-code-cli/claude-haiku-4": "haiku",
-  // Aliases
+  "claude-code-cli/claude-opus-4-6": "claude-opus-4-6",
+  "claude-code-cli/claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-code-cli/claude-sonnet-4-5": "claude-sonnet-4-5",
+  "claude-code-cli/claude-haiku-4-5": "claude-haiku-4-5",
+  // With provider prefix (claude-proxy/)
+  "claude-proxy/claude-opus-4": "opus",
+  "claude-proxy/claude-sonnet-4": "sonnet",
+  "claude-proxy/claude-haiku-4": "haiku",
+  "claude-proxy/claude-opus-4-6": "claude-opus-4-6",
+  "claude-proxy/claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-proxy/claude-sonnet-4-5": "claude-sonnet-4-5",
+  "claude-proxy/claude-haiku-4-5": "claude-haiku-4-5",
+  // Short aliases
   "opus": "opus",
   "sonnet": "sonnet",
   "haiku": "haiku",
@@ -47,6 +64,23 @@ export function extractModel(model: string): ClaudeModel {
 }
 
 /**
+ * Extract text from OpenAI message content (handles string, array, and null)
+ */
+function extractContentText(content: OpenAIMessageContent): string {
+  if (typeof content === "string") return content;
+  if (content === null || content === undefined) return "";
+  if (Array.isArray(content)) {
+    return content
+      .filter((part): part is typeof part & { text: string } =>
+        part.type === "text" && typeof part.text === "string"
+      )
+      .map((part) => part.text)
+      .join("\n");
+  }
+  return String(content);
+}
+
+/**
  * Convert OpenAI messages array to a single prompt string for Claude CLI
  *
  * Claude Code CLI in --print mode expects a single prompt, not a conversation.
@@ -56,20 +90,24 @@ export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): strin
   const parts: string[] = [];
 
   for (const msg of messages) {
+    const text = extractContentText(msg.content);
+    if (!text) continue;
+
     switch (msg.role) {
       case "system":
-        // System messages become context instructions
-        parts.push(`<system>\n${msg.content}\n</system>\n`);
+      case "developer":
+        // System/developer messages become context instructions
+        parts.push(`<system>\n${text}\n</system>\n`);
         break;
 
       case "user":
         // User messages are the main prompt
-        parts.push(msg.content);
+        parts.push(text);
         break;
 
       case "assistant":
         // Previous assistant responses for context
-        parts.push(`<previous_response>\n${msg.content}\n</previous_response>\n`);
+        parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
         break;
     }
   }
