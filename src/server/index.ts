@@ -45,10 +45,13 @@ function createApp(): Express {
     res.sendStatus(200);
   });
 
-  // Routes
+  // Routes — register both /v1/* and /* paths so clients that omit the
+  // /v1 prefix (e.g. OpenCLAW's openai-completions provider) still work.
   app.get("/health", handleHealth);
   app.get("/v1/models", handleModels);
+  app.get("/models", handleModels);
   app.post("/v1/chat/completions", handleChatCompletions);
+  app.post("/chat/completions", handleChatCompletions);
 
   // 404 handler
   app.use((_req: Request, res: Response) => {
