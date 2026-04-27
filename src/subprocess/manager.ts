@@ -42,32 +42,27 @@ export class ClaudeSubprocess extends EventEmitter {
   private timeoutId: NodeJS.Timeout | null = null;
   private isKilled: boolean = false;
 
+  private spawnedAt: number = 0;
+  private spawnedModel: ClaudeModel | null = null;
+
   /**
-   * Start the Claude CLI subprocess with the given prompt
+   * Spawn the subprocess without writing stdin yet. Used by the warm pool to
+   * pay the ~1.5s claude bootstrap cost ahead of a request.
    */
-  async start(prompt: string, options: SubprocessOptions): Promise<void> {
+  async prepare(options: SubprocessOptions): Promise<void> {
     const args = this.buildArgs(options);
-    const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     return new Promise((resolve, reject) => {
       try {
-        // Use spawn() for security - no shell interpretation
         this.process = spawn("claude", args, {
           cwd: options.cwd || process.cwd(),
           env: { ...process.env, OPENCLAW_PROXY: "1" },
           stdio: ["pipe", "pipe", "pipe"],
         });
 
-        // Set timeout
-        this.timeoutId = setTimeout(() => {
-          if (!this.isKilled) {
-            this.isKilled = true;
-            this.process?.kill("SIGTERM");
-            this.emit("error", new Error(`Request timed out after ${timeout}ms`));
-          }
-        }, timeout);
+        this.spawnedAt = Date.now();
+        this.spawnedModel = options.model;
 
-        // Handle spawn errors (e.g., claude not found)
         this.process.on("error", (err) => {
           this.clearTimeout();
           if (err.message.includes("ENOENT")) {
@@ -81,48 +76,94 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
-        // Pass prompt via stdin to avoid E2BIG with large prompts
-        this.process.stdin?.write(prompt);
-        this.process.stdin?.end();
-
-        console.error(`[Subprocess] Process spawned with PID: ${this.process.pid}`);
-
-        // Parse JSON stream from stdout
+        // Set up output listeners eagerly so a warm process pre-buffers any
+        // startup-banner output rather than blocking on the pipe.
         this.process.stdout?.on("data", (chunk: Buffer) => {
           const data = chunk.toString();
-          console.error(`[Subprocess] Received ${data.length} bytes of stdout`);
           this.buffer += data;
           this.processBuffer();
         });
 
-        // Capture stderr for debugging
         this.process.stderr?.on("data", (chunk: Buffer) => {
           const errorText = chunk.toString().trim();
           if (errorText) {
-            // Don't emit as error unless it's actually an error
-            // Claude CLI may write debug info to stderr
             console.error("[Subprocess stderr]:", errorText.slice(0, 200));
           }
         });
 
-        // Handle process close
         this.process.on("close", (code) => {
-          console.error(`[Subprocess] Process closed with code: ${code}`);
           this.clearTimeout();
-          // Process any remaining buffer
-          if (this.buffer.trim()) {
-            this.processBuffer();
-          }
+          if (this.buffer.trim()) this.processBuffer();
           this.emit("close", code);
         });
 
-        // Resolve immediately since we're streaming
-        resolve();
+        // Resolve as soon as the process has been spawned (PID assigned).
+        this.process.once("spawn", () => {
+          console.error(`[Subprocess] Prepared PID ${this.process?.pid} for model ${options.model}`);
+          resolve();
+        });
       } catch (err) {
-        this.clearTimeout();
         reject(err);
       }
     });
+  }
+
+  /**
+   * Write the prompt to a prepared subprocess and close stdin so claude starts
+   * processing. Starts the per-request timeout here (not at spawn time) so the
+   * idle period in the pool doesn't count.
+   */
+  submit(prompt: string, timeoutMs: number = DEFAULT_TIMEOUT): void {
+    if (!this.process) throw new Error("Subprocess not prepared");
+
+    this.timeoutId = setTimeout(() => {
+      if (!this.isKilled) {
+        this.isKilled = true;
+        this.process?.kill("SIGTERM");
+        this.emit("error", new Error(`Request timed out after ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+
+    this.process.stdin?.write(prompt);
+    this.process.stdin?.end();
+  }
+
+  /**
+   * Spawn + submit in one shot. Kept for backward compatibility / cold-path.
+   */
+  async start(prompt: string, options: SubprocessOptions): Promise<void> {
+    await this.prepare(options);
+    this.submit(prompt, options.timeout || DEFAULT_TIMEOUT);
+  }
+
+  /** Model this subprocess was spawned with. */
+  getModel(): ClaudeModel | null {
+    return this.spawnedModel;
+  }
+
+  /** How long this subprocess has been alive in ms. */
+  getAge(): number {
+    return this.spawnedAt ? Date.now() - this.spawnedAt : 0;
+  }
+
+  /** Is the spawned process still alive and not yet submitted-to? */
+  isHealthy(): boolean {
+    return (
+      this.process !== null &&
+      !this.isKilled &&
+      this.process.exitCode === null &&
+      this.timeoutId === null // not yet submitted
+    );
+  }
+
+  /** Detailed health for debugging stale-slot diagnostics. */
+  healthDetails(): { hasProc: boolean; isKilled: boolean; exitCode: number | null; submitted: boolean } {
+    return {
+      hasProc: this.process !== null,
+      isKilled: this.isKilled,
+      exitCode: this.process?.exitCode ?? null,
+      submitted: this.timeoutId !== null,
+    };
   }
 
   /**
@@ -139,6 +180,10 @@ export class ClaudeSubprocess extends EventEmitter {
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
       "--no-session-persistence", // Don't save sessions
+      // Move per-machine sections (cwd, env info, git status, memory paths)
+      // out of the cached system prompt into the first user message.
+      // Lets multiple cwds/users hit the same Anthropic prompt cache prefix.
+      "--exclude-dynamic-system-prompt-sections",
     ];
 
     // Support headless operation without permission prompts

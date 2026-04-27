@@ -7,6 +7,7 @@
 import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
+import { acquireSubprocess } from "../subprocess/pool.js";
 import { openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -43,7 +44,10 @@ export async function handleChatCompletions(
 
     // Convert to CLI input format
     const cliInput = openaiToCli(body);
-    const subprocess = new ClaudeSubprocess();
+
+    // Acquire a (possibly warm) prepared subprocess. Cold path falls back to
+    // spawning here; warm path skips the ~1.5s claude bootstrap.
+    const subprocess = await acquireSubprocess(cliInput.model);
 
     if (stream) {
       await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
@@ -175,14 +179,13 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
-    subprocess.start(cliInput.prompt, {
-      model: cliInput.model,
-      sessionId: cliInput.sessionId,
-    }).catch((err) => {
-      console.error("[Streaming] Subprocess start error:", err);
+    // Subprocess is already prepared by the pool; just write the prompt.
+    try {
+      subprocess.submit(cliInput.prompt);
+    } catch (err) {
+      console.error("[Streaming] Submit error:", err);
       reject(err);
-    });
+    }
   });
 }
 
@@ -229,22 +232,16 @@ async function handleNonStreamingResponse(
       resolve();
     });
 
-    // Start the subprocess
-    subprocess
-      .start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-      })
-      .catch((error) => {
-        res.status(500).json({
-          error: {
-            message: error.message,
-            type: "server_error",
-            code: null,
-          },
-        });
-        resolve();
+    // Subprocess is already prepared by the pool; just write the prompt.
+    try {
+      subprocess.submit(cliInput.prompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({
+        error: { message, type: "server_error", code: null },
       });
+      resolve();
+    }
   });
 }
 
