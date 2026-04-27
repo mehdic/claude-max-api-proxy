@@ -8,13 +8,17 @@ import type { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { acquireSubprocess } from "../subprocess/pool.js";
-import { openaiToCli } from "../adapter/openai-to-cli.js";
+import { acquireSession, returnSession, discardSession } from "../subprocess/session-pool.js";
+import { extractModel, openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
+  extractTextContent,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+
+const STREAM_JSON_ENABLED = process.env.CLAUDE_PROXY_STREAM_JSON === "1";
 
 /**
  * Handle POST /v1/chat/completions
@@ -39,6 +43,12 @@ export async function handleChatCompletions(
           code: "invalid_messages",
         },
       });
+      return;
+    }
+
+    if (STREAM_JSON_ENABLED) {
+      const model = extractModel(body.model);
+      await handleStreamJsonRequest(req, res, model, body, requestId, stream);
       return;
     }
 
@@ -243,6 +253,108 @@ async function handleNonStreamingResponse(
       resolve();
     }
   });
+}
+
+/**
+ * Handle a chat completion via stream-json transport with conversation pooling.
+ * Either reuses a live subprocess (warm: cache hits the prior turns) or spawns
+ * a new one (cold: sends the conversation as one flat user message).
+ */
+async function handleStreamJsonRequest(
+  _req: Request,
+  res: Response,
+  model: string,
+  body: OpenAIChatRequest,
+  requestId: string,
+  stream: boolean,
+): Promise<void> {
+  const acquired = await acquireSession(model, body.messages);
+  const subprocess = acquired.subprocess;
+
+  // For warm path, send only the new user message; for cold, send the full
+  // flattened conversation as one user message.
+  const userText = acquired.isWarm ? acquired.lastUserText : (acquired.flattenedPrompt ?? acquired.lastUserText);
+
+  if (stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Request-Id", requestId);
+    res.flushHeaders();
+    res.write(":ok\n\n");
+  }
+
+  let isFirst = true;
+  let lastModel = "claude-sonnet-4";
+  let assistantText = "";
+  let done = false;
+
+  const onContentDelta = (event: ClaudeCliStreamEvent) => {
+    const text = event.event.delta?.text || "";
+    if (!text) return;
+    assistantText += text;
+    if (stream && !res.writableEnded) {
+      const chunk = {
+        id: `chatcmpl-${requestId}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: lastModel,
+        choices: [{
+          index: 0,
+          delta: { role: isFirst ? "assistant" : undefined, content: text },
+          finish_reason: null,
+        }],
+      };
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      isFirst = false;
+    }
+  };
+
+  const onAssistant = (m: ClaudeCliAssistant) => {
+    lastModel = m.message.model;
+    // Capture full text in case streaming deltas were missed.
+    if (!assistantText) assistantText = extractTextContent(m);
+  };
+
+  subprocess.on("content_delta", onContentDelta);
+  subprocess.on("assistant", onAssistant);
+
+  res.on("close", () => {
+    if (!done) {
+      console.error("[StreamJson] client disconnected pre-completion, killing subprocess");
+      discardSession(subprocess);
+    }
+  });
+
+  try {
+    const result = await subprocess.submitTurn(userText);
+    done = true;
+
+    if (stream && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel))}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      res.json(cliResultToOpenai(result, requestId));
+    }
+
+    // Re-pool the subprocess for the next turn in this conversation.
+    returnSession(subprocess, model, body.messages, assistantText);
+  } catch (err) {
+    done = true;
+    discardSession(subprocess);
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("[StreamJson] turn error:", message);
+    if (stream && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ error: { message, type: "server_error", code: null } })}\n\n`);
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      res.status(500).json({ error: { message, type: "server_error", code: null } });
+    }
+  } finally {
+    subprocess.off("content_delta", onContentDelta);
+    subprocess.off("assistant", onAssistant);
+  }
 }
 
 /**
