@@ -27,7 +27,7 @@ import { acquirePreInit } from "./init-pool.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import type { OpenAIChatMessage, OpenAIMessageContent } from "../types/openai.js";
 
-const IDLE_TTL_MS = 4 * 60 * 1000; // <5min Anthropic cache TTL
+const IDLE_TTL_MS = 6 * 60 * 1000; // ~1min past Anthropic's 5min cache TTL — enough buffer that we don't evict mid-window from clock skew or in-flight handoff, but not so long we hold dead subprocesses for cache-miss-anyway gaps
 const MAX_SESSIONS = 8;
 
 interface Slot {
