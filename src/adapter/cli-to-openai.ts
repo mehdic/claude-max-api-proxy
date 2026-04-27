@@ -74,6 +74,11 @@ export function cliResultToOpenai(
     ? Object.keys(result.modelUsage)[0]
     : "claude-sonnet-4";
 
+  const inputTokens = result.usage?.input_tokens || 0;
+  const outputTokens = result.usage?.output_tokens || 0;
+  const cacheReadTokens = result.usage?.cache_read_input_tokens || 0;
+  const cacheCreationTokens = result.usage?.cache_creation_input_tokens || 0;
+
   return {
     id: `chatcmpl-${requestId}`,
     object: "chat.completion",
@@ -90,10 +95,11 @@ export function cliResultToOpenai(
       },
     ],
     usage: {
-      prompt_tokens: result.usage?.input_tokens || 0,
-      completion_tokens: result.usage?.output_tokens || 0,
-      total_tokens:
-        (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0),
+      prompt_tokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens,
+      prompt_tokens_details: { cached_tokens: cacheReadTokens },
+      cache_creation_input_tokens: cacheCreationTokens,
     },
   };
 }
