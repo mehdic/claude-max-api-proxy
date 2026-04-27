@@ -17,21 +17,39 @@ const DEFAULT_MODEL = "claude-code-cli/claude-sonnet-4";
 // Available models
 const AVAILABLE_MODELS = [
   {
+    id: "claude-opus-4-7",
+    name: "Claude Opus 4.7",
+    alias: "claude-opus-4-7",
+    reasoning: true,
+  },
+  {
+    id: "claude-opus-4-6",
+    name: "Claude Opus 4.6",
+    alias: "claude-opus-4-6",
+    reasoning: true,
+  },
+  {
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6",
+    alias: "claude-sonnet-4-6",
+    reasoning: false,
+  },
+  {
+    id: "claude-haiku-4-5-20251001",
+    name: "Claude Haiku 4.5",
+    alias: "claude-haiku-4-5-20251001",
+    reasoning: false,
+  },
+  {
     id: "claude-opus-4",
-    name: "Claude Opus 4.5",
+    name: "Claude Opus 4 (legacy alias)",
     alias: "opus",
     reasoning: true,
   },
   {
     id: "claude-sonnet-4",
-    name: "Claude Sonnet 4",
+    name: "Claude Sonnet 4 (legacy alias)",
     alias: "sonnet",
-    reasoning: false,
-  },
-  {
-    id: "claude-haiku-4",
-    name: "Claude Haiku 4",
-    alias: "haiku",
     reasoning: false,
   },
 ];
