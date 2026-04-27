@@ -288,11 +288,31 @@ async function handleStreamJsonRequest(
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
   let done = false;
+  let firstContent = false;
+
+  // SSE keepalive — openclaw disconnects if it sees nothing for ~3-5s.
+  // claude's first content_delta can take that long on a cold-spawned
+  // subprocess. Keep the connection warm with a comment line every second
+  // until we have real content (any subsequent chunk is itself a keepalive).
+  const keepaliveTimer = stream
+    ? setInterval(() => {
+        if (!firstContent && !res.writableEnded) {
+          res.write(":keepalive\n\n");
+        }
+      }, 1000)
+    : null;
+  const stopKeepalive = () => {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+  };
 
   const onContentDelta = (event: ClaudeCliStreamEvent) => {
     const text = event.event.delta?.text || "";
     if (!text) return;
     assistantText += text;
+    if (!firstContent) {
+      firstContent = true;
+      stopKeepalive();
+    }
     if (stream && !res.writableEnded) {
       const chunk = {
         id: `chatcmpl-${requestId}`,
@@ -352,6 +372,7 @@ async function handleStreamJsonRequest(
       res.status(500).json({ error: { message, type: "server_error", code: null } });
     }
   } finally {
+    stopKeepalive();
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
   }
