@@ -23,6 +23,7 @@
 
 import { createHash } from "crypto";
 import { StreamJsonSubprocess } from "./stream-json-manager.js";
+import { acquirePreInit } from "./init-pool.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import type { OpenAIChatMessage, OpenAIMessageContent } from "../types/openai.js";
 
@@ -93,9 +94,10 @@ async function cold(
   messages: OpenAIChatMessage[],
   postTurnKey?: string,
 ): Promise<AcquireResult> {
-  console.error(`[SessionPool] COLD spawn model=${model}`);
-  const sub = new StreamJsonSubprocess();
-  await sub.start({ model });
+  console.error(`[SessionPool] COLD model=${model} (will use init-pool)`);
+  // Pull from the init-pool — most of the time this is a pre-spawned,
+  // already-initialized subprocess so cold turns skip the 5s handshake.
+  const sub = await acquirePreInit(model);
 
   return {
     subprocess: sub,
