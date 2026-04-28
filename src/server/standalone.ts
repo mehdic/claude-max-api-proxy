@@ -18,10 +18,14 @@ async function main(): Promise<void> {
   console.log("Claude Code CLI Provider - Standalone Server");
   console.log("============================================\n");
 
-  // Parse port from command line
-  const port = parseInt(process.argv[2] || String(DEFAULT_PORT), 10);
+  // Resolve port. Precedence: CLI arg > CLAUDE_PROXY_PORT env > DEFAULT_PORT.
+  // CLI arg wins so an existing LaunchAgent that pins the port via
+  // ProgramArguments still works; env-only setups can leave argv empty and
+  // just set CLAUDE_PROXY_PORT in EnvironmentVariables.
+  const portSource = process.argv[2] || process.env.CLAUDE_PROXY_PORT || String(DEFAULT_PORT);
+  const port = parseInt(portSource, 10);
   if (isNaN(port) || port < 1 || port > 65535) {
-    console.error(`Invalid port: ${process.argv[2]}`);
+    console.error(`Invalid port: ${portSource}`);
     process.exit(1);
   }
 
