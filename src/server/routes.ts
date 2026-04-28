@@ -288,18 +288,44 @@ async function handleStreamJsonRequest(
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
   let done = false;
-  let firstContent = false;
+  let lastActivityAt = Date.now();
 
-  // SSE keepalive — openclaw disconnects if it sees nothing for ~3-5s.
-  // claude's first content_delta can take that long on a cold-spawned
-  // subprocess. Keep the connection warm with a comment line every second
-  // until we have real content (any subsequent chunk is itself a keepalive).
+  // Keepalive — openclaw aborts an LLM request if no token is received within
+  // `agents.defaults.llm.idleTimeoutSeconds` (default 120s). claude can stay
+  // quiet for that long during cold init or while "thinking" mid-generation.
+  // SSE comments (`:keepalive`) DO NOT reset openclaw's counter — it counts
+  // OpenAI streaming tokens, not raw bytes. So we periodically emit a real
+  // chat.completion.chunk with empty content, which the openclaw stream
+  // consumer treats as a token and resets the idle timer. Empty content is
+  // valid OpenAI streaming (clients render nothing) and won't disturb display.
+  const KEEPALIVE_GAP_MS = 30_000; // emit if 30s since last real or fake delta
+  const KEEPALIVE_CHECK_MS = 5_000;
+
+  const writeKeepaliveChunk = () => {
+    if (res.writableEnded) return;
+    const chunk = {
+      id: `chatcmpl-${requestId}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: lastModel,
+      choices: [{
+        index: 0,
+        delta: isFirst ? { role: "assistant", content: "" } : { content: "" },
+        finish_reason: null,
+      }],
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    isFirst = false;
+    lastActivityAt = Date.now();
+  };
+
   const keepaliveTimer = stream
     ? setInterval(() => {
-        if (!firstContent && !res.writableEnded) {
-          res.write(":keepalive\n\n");
+        if (done || res.writableEnded) return;
+        if (Date.now() - lastActivityAt >= KEEPALIVE_GAP_MS) {
+          writeKeepaliveChunk();
         }
-      }, 1000)
+      }, KEEPALIVE_CHECK_MS)
     : null;
   const stopKeepalive = () => {
     if (keepaliveTimer) clearInterval(keepaliveTimer);
@@ -309,10 +335,7 @@ async function handleStreamJsonRequest(
     const text = event.event.delta?.text || "";
     if (!text) return;
     assistantText += text;
-    if (!firstContent) {
-      firstContent = true;
-      stopKeepalive();
-    }
+    lastActivityAt = Date.now();
     if (stream && !res.writableEnded) {
       const chunk = {
         id: `chatcmpl-${requestId}`,
