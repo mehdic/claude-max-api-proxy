@@ -290,16 +290,36 @@ async function handleStreamJsonRequest(
   let done = false;
   let lastActivityAt = Date.now();
 
-  // Keepalive — openclaw aborts an LLM request if no token is received within
-  // `agents.defaults.llm.idleTimeoutSeconds` (default 120s). claude can stay
-  // quiet for that long during cold init or while "thinking" mid-generation.
-  // SSE comments (`:keepalive`) DO NOT reset openclaw's counter — it counts
-  // OpenAI streaming tokens, not raw bytes. So we periodically emit a real
-  // chat.completion.chunk with empty content, which the openclaw stream
-  // consumer treats as a token and resets the idle timer. Empty content is
-  // valid OpenAI streaming (clients render nothing) and won't disturb display.
-  const KEEPALIVE_GAP_MS = 30_000; // emit if 30s since last real or fake delta
+  // -------------------- Keepalive ---------------------
+  //
+  // openclaw aborts an LLM request when its stream iterator goes
+  // `agents.defaults.llm.idleTimeoutSeconds` (default 120s) without yielding.
+  // We have to keep that iterator yielding ANY chunk during long claude
+  // turns (cold init, deep thinking, tool use, etc.).
+  //
+  // Three layers, defense-in-depth:
+  //
+  // 1. Eager handshake — emit a `delta: { role: "assistant" }` chunk the
+  //    instant we open the SSE stream, before claude has done anything.
+  //    openclaw's iterator yields immediately, idle timer starts already
+  //    reset. Eliminates the cold-start race entirely.
+  //
+  // 2. Activity-bound tracker — `lastActivityAt` is bumped on EVERY claude
+  //    event (system init, hooks, message_start, content_block_start,
+  //    content_block_delta, message_delta, message_stop). claude is rarely
+  //    truly silent — if it's running a tool or thinking, those events
+  //    fire and count as activity even when no user-visible text is
+  //    generated.
+  //
+  // 3. Periodic synthetic keepalive — every 5s we check if 10s have passed
+  //    since the last activity. If yes, emit a `delta: { content: "​" }`
+  //    chunk. Zero-width space: 1 character that openclaw definitely
+  //    counts as content (so its client doesn't filter it as empty), but
+  //    that no UI renders. Fires repeatedly for the entire request — works
+  //    fine even for multi-minute claude turns.
+  const KEEPALIVE_GAP_MS = 10_000;
   const KEEPALIVE_CHECK_MS = 5_000;
+  const ZWSP = "​"; // zero-width space — counts as content, renders nothing
 
   const writeKeepaliveChunk = () => {
     if (res.writableEnded) return;
@@ -310,7 +330,7 @@ async function handleStreamJsonRequest(
       model: lastModel,
       choices: [{
         index: 0,
-        delta: isFirst ? { role: "assistant", content: "" } : { content: "" },
+        delta: isFirst ? { role: "assistant", content: ZWSP } : { content: ZWSP },
         finish_reason: null,
       }],
     };
@@ -319,6 +339,27 @@ async function handleStreamJsonRequest(
     lastActivityAt = Date.now();
   };
 
+  // Layer 1: eager handshake, fires before claude starts.
+  if (stream && !res.writableEnded) {
+    const handshake = {
+      id: `chatcmpl-${requestId}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: lastModel,
+      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    };
+    res.write(`data: ${JSON.stringify(handshake)}\n\n`);
+    isFirst = false;
+    lastActivityAt = Date.now();
+  }
+
+  // Layer 2: bump activity on ANY claude event, not just content_delta.
+  const onAnyClaudeEvent = () => {
+    lastActivityAt = Date.now();
+  };
+  subprocess.on("message", onAnyClaudeEvent);
+
+  // Layer 3: periodic safety-net keepalive.
   const keepaliveTimer = stream
     ? setInterval(() => {
         if (done || res.writableEnded) return;
@@ -398,6 +439,7 @@ async function handleStreamJsonRequest(
     stopKeepalive();
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
+    subprocess.off("message", onAnyClaudeEvent);
   }
 }
 
