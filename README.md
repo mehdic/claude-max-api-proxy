@@ -2,7 +2,9 @@
 
 **Use your Claude Pro / Max subscription with any OpenAI-compatible client.** No API keys, no per-token billing, no separate Anthropic account.
 
-This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` format — Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
+This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` format — [openclaw](https://github.com/openclaw/openclaw), Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
+
+> **Tested with openclaw `2026.4.24`** as a drop-in `openai-completions` provider. Multi-turn cache hits, streaming, and the SSE keepalive have all been verified against live openclaw traffic on this version. See [openclaw integration](#openclaw) below for the exact provider config.
 
 ## Why this exists
 
@@ -131,6 +133,32 @@ CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
 
 ## Wiring up clients
+
+<a id="openclaw"></a>
+### openclaw
+
+Add it as a normal `openai-completions` provider in `~/.openclaw/openclaw.json`:
+
+```json
+"models": {
+  "providers": {
+    "claude-proxy": {
+      "baseUrl": "http://127.0.0.1:3456",
+      "apiKey": "claude-proxy-noop",
+      "api": "openai-completions",
+      "models": [
+        { "id": "claude-opus-4-7",          "name": "Claude Opus 4.7 (via proxy)",   "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
+        { "id": "claude-sonnet-4-6",        "name": "Claude Sonnet 4.6 (via proxy)", "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
+        { "id": "claude-haiku-4-5-20251001","name": "Claude Haiku 4.5 (via proxy)",  "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 }
+      ]
+    }
+  }
+}
+```
+
+For the models to appear in the Telegram `/model` picker, also add `claude-proxy/<id>` entries to the `agents.defaults.models` allowlist. Then `launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway` and your agents can use `claude-proxy/claude-opus-4-7` (etc.) as their primary model.
+
+Tested on openclaw `2026.4.24`. The `2026.4.25` release was broken at the bundled-channel install step (unrelated to this proxy); `2026.4.24` is the last known-good as of this writing.
 
 ### OpenAI Python SDK
 
