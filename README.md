@@ -56,7 +56,14 @@ npm run build
 node dist/server/standalone.js
 ```
 
-The server listens on `127.0.0.1:3456`. Point your client at it:
+The server listens on `127.0.0.1:3456` by default. Override the port either way:
+
+```bash
+node dist/server/standalone.js 3458              # CLI arg
+CLAUDE_PROXY_PORT=3458 node dist/server/standalone.js   # env var
+```
+
+CLI arg wins if both are set. Point your client at the chosen port:
 
 ```bash
 curl -s http://127.0.0.1:3456/health
@@ -111,13 +118,15 @@ Enable:
 CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 ```
 
-#### stream-json env vars
+### Environment variables
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `CLAUDE_PROXY_STREAM_JSON` | unset (off) | `1` to switch to persistent NDJSON transport |
-| `CLAUDE_PROXY_PREWARM_MODELS` | `claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001` | Comma-separated model ids to pre-initialize at boot |
-| `CLAUDE_PROXY_INIT_POOL` | unset (on) | `0` to disable the per-model init pool |
+| `CLAUDE_PROXY_PORT` | `3456` | Port to listen on. CLI arg (`node standalone.js 3458`) takes precedence if also given. |
+| `CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | unset | `true` to pass `--dangerously-skip-permissions` to `claude`. Required for headless / LaunchAgent operation since there's no TTY for permission prompts. |
+| `CLAUDE_PROXY_STREAM_JSON` | unset (off) | `1` to switch to persistent NDJSON transport with multi-turn cache reuse. |
+| `CLAUDE_PROXY_PREWARM_MODELS` | `claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001` | Comma-separated model ids to pre-initialize at boot (stream-json mode only). |
+| `CLAUDE_PROXY_INIT_POOL` | unset (on) | `0` to disable the per-model init pool (stream-json mode only). |
 
 #### Caveats
 
@@ -135,30 +144,147 @@ CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 ## Wiring up clients
 
 <a id="openclaw"></a>
-### openclaw
+### openclaw — full step-by-step
 
-Add it as a normal `openai-completions` provider in `~/.openclaw/openclaw.json`:
+End-to-end recipe to get an openclaw agent (Sevro, etc.) running on your Claude Max subscription via this proxy. Tested on **openclaw `2026.4.24`**.
+
+#### 1. Make sure the `claude` CLI is installed and signed in
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude auth login          # OAuth flow with your Pro / Max account
+claude --version           # sanity check
+```
+
+#### 2. Clone, install, and build the proxy
+
+```bash
+mkdir -p ~/.openclaw/projects
+cd ~/.openclaw/projects
+git clone https://github.com/mehdic/claude-max-api-proxy.git
+cd claude-max-api-proxy
+npm install
+npm run build
+```
+
+#### 3. Smoke-test the proxy in the foreground
+
+```bash
+CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=true node dist/server/standalone.js
+# in another terminal:
+curl -s http://127.0.0.1:3456/health
+curl -s http://127.0.0.1:3456/models
+```
+
+If the chat probe below replies with text, the proxy half is working. Stop the foreground server (Ctrl+C) before continuing.
+
+```bash
+curl -s -X POST http://127.0.0.1:3456/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply OK only"}]}'
+```
+
+#### 4. (Recommended) Run it as a macOS LaunchAgent
+
+Save as `~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist`, replace `<HOME>` with your home directory, then `launchctl bootstrap gui/$(id -u) <plist>`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.openclaw.claude-proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string><HOME>/.openclaw/projects/claude-max-api-proxy/dist/server/standalone.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string><HOME></string>
+    <key>CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS</key><string>true</string>
+    <key>CLAUDE_PROXY_PORT</key><string>3456</string>
+    <!-- Recommended: enable persistent transport for multi-turn cache reuse -->
+    <key>CLAUDE_PROXY_STREAM_JSON</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/><key>NetworkState</key><true/></dict>
+  <key>StandardOutPath</key><string><HOME>/.openclaw/logs/claude-proxy-stdout.log</string>
+  <key>StandardErrorPath</key><string><HOME>/.openclaw/logs/claude-proxy-stderr.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist
+sleep 3
+curl -s http://127.0.0.1:3456/health
+```
+
+#### 5. Register the proxy as an openclaw provider
+
+Edit `~/.openclaw/openclaw.json`. Under `models.providers`, add:
 
 ```json
-"models": {
-  "providers": {
-    "claude-proxy": {
-      "baseUrl": "http://127.0.0.1:3456",
-      "apiKey": "claude-proxy-noop",
-      "api": "openai-completions",
-      "models": [
-        { "id": "claude-opus-4-7",          "name": "Claude Opus 4.7 (via proxy)",   "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
-        { "id": "claude-sonnet-4-6",        "name": "Claude Sonnet 4.6 (via proxy)", "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
-        { "id": "claude-haiku-4-5-20251001","name": "Claude Haiku 4.5 (via proxy)",  "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 }
-      ]
-    }
-  }
+"claude-proxy": {
+  "baseUrl": "http://127.0.0.1:3456",
+  "apiKey": "claude-proxy-noop",
+  "api": "openai-completions",
+  "models": [
+    { "id": "claude-opus-4-7",          "name": "Claude Opus 4.7 (via proxy)",   "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
+    { "id": "claude-sonnet-4-6",        "name": "Claude Sonnet 4.6 (via proxy)", "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 },
+    { "id": "claude-haiku-4-5-20251001","name": "Claude Haiku 4.5 (via proxy)",  "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 8192 }
+  ]
 }
 ```
 
-For the models to appear in the Telegram `/model` picker, also add `claude-proxy/<id>` entries to the `agents.defaults.models` allowlist. Then `launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway` and your agents can use `claude-proxy/claude-opus-4-7` (etc.) as their primary model.
+> If you ran the proxy on a non-default port, change `baseUrl` to match.
 
-Tested on openclaw `2026.4.24`. The `2026.4.25` release was broken at the bundled-channel install step (unrelated to this proxy); `2026.4.24` is the last known-good as of this writing.
+#### 6. Add the models to the agent allowlist
+
+Still in `openclaw.json`, append to `agents.defaults.models`:
+
+```json
+"claude-proxy/claude-opus-4-7",
+"claude-proxy/claude-sonnet-4-6",
+"claude-proxy/claude-haiku-4-5-20251001"
+```
+
+Without this step the provider is registered but the models won't appear in Telegram's `/model` picker.
+
+#### 7. Restart the openclaw gateway
+
+```bash
+launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
+openclaw gateway probe       # expect "Reachable: yes"
+```
+
+#### 8. Point an agent at the proxy
+
+Edit your agent's entry in `agents.list` (or use `openclaw agents edit <id>`):
+
+```json
+"model": {
+  "primary": "claude-proxy/claude-opus-4-7",
+  "fallbacks": ["openai-codex/gpt-5.5", "openai-codex/gpt-5.4-mini"]
+}
+```
+
+Always keep at least one non-claude-proxy fallback so a proxy outage doesn't take the agent down.
+
+#### 9. Verify
+
+In Telegram:
+- `/model` — confirm `claude-proxy` shows up with all three models.
+- Send a message — the agent's reply should land.
+- `tail -f ~/.openclaw/logs/claude-proxy-stderr.log` — you should see `[SessionPool]` / `[InitPool]` lines (in stream-json mode).
+
+#### Version notes
+
+- `2026.4.24` — known-good with this proxy, including stream-json mode.
+- `2026.4.25` — broken at the bundled-channel install step (unrelated to this proxy). If you're stuck on it, roll back to `2026.4.24`.
 
 ### OpenAI Python SDK
 
