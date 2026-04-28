@@ -374,6 +374,40 @@ Save as `~/Library/LaunchAgents/local.claude-proxy.plist`, edit `<HOME>` and the
 </plist>
 ```
 
+## Long-running tools — use MCP polling, not blocking calls
+
+The 3-layer keepalive in stream-json mode protects the proxy's *active LLM stream* against client-side idle timeouts. It does **not** help when an agent invokes a tool that itself takes minutes to complete (a CI build, an n8n workflow, a long shell script). During tool execution the LLM stream is already closed — the keepalive has nothing to keep alive — and instead the consuming framework's tool-execution timeout governs how long it waits.
+
+The right architectural pattern for those is **trigger + poll across multiple LLM rounds**, exposed by an MCP server:
+
+```
+LLM round 1: agent → mcp/tool.trigger(args)              → returns handle/run_id
+              (LLM stream closes in seconds, no risk)
+
+between:      consumer schedules the next round (cron / loop / user nudge)
+
+LLM round 2: agent → mcp/tool.status(run_id)             → "running, step 2 of 5"
+              agent decides to wait → another round in N seconds
+
+…
+
+LLM round N: agent → mcp/tool.status(run_id)             → "success, output: …"
+              agent reports back to user
+```
+
+Each LLM call is short. The expensive wait happens *between* LLM calls, in regular cron/loop time, not inside a stream. There's no streaming idle pressure on this proxy, no inflated tool-execution timeout, and the user gets visible progress.
+
+Concrete servers that follow this pattern:
+
+| Long-running thing | MCP server |
+|--------------------|------------|
+| n8n workflows      | [`czlonkowski/n8n-mcp`](https://github.com/czlonkowski/n8n-mcp) — `n8n_test_workflow` triggers, `n8n_executions` lists/gets (works on running executions too) |
+| GitHub Actions     | [`github/github-mcp-server`](https://github.com/github/github-mcp-server) — `list_workflow_runs`, `get_workflow_run` |
+| K8s jobs           | community k8s MCP servers — pod status, log tail |
+| Anything custom    | wrap your job-runner's status API in an MCP server |
+
+If you find yourself bumping `agents.tools.exec.timeoutSec` to several minutes to accommodate a curl-the-webhook-and-block call, that's a signal to look for (or write) an MCP server for that workload instead.
+
 ## Architecture
 
 ```
