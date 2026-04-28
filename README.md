@@ -1,4 +1,4 @@
-# claude-max-api-proxy
+# claude-proxy
 
 **Use your Claude Pro / Max subscription with any OpenAI-compatible client.** No API keys, no per-token billing, no separate Anthropic account.
 
@@ -12,7 +12,7 @@ This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI
 |----------|------|------------|
 | Anthropic API directly | ~$15 / M input, ~$75 / M output | Pay per call |
 | Claude Pro / Max | $20–200 / mo flat | OAuth tokens blocked from third-party API clients |
-| **claude-max-api-proxy** | $0 extra (uses your subscription) | Routes through the local `claude` CLI |
+| **claude-proxy** | $0 extra (uses your subscription) | Routes through the local `claude` CLI |
 
 Anthropic blocks OAuth tokens from being used directly with third-party API clients. The Claude Code CLI (`claude`) *can* use OAuth tokens. This proxy bridges the gap.
 
@@ -22,7 +22,7 @@ Anthropic blocks OAuth tokens from being used directly with third-party API clie
 Your tool (Continue.dev, Aider, your agent, …)
        │  HTTP, OpenAI chat/completions format
        ▼
-claude-max-api-proxy   (this project, listens on :3456)
+claude-proxy   (this project, listens on :3456)
        │  spawns subprocess
        ▼
 claude --print …       (the official Claude Code CLI)
@@ -49,8 +49,8 @@ The proxy itself is **stateless**: it does not store prompts, conversation histo
 ## Install & run
 
 ```bash
-git clone https://github.com/mehdic/claude-max-api-proxy.git
-cd claude-max-api-proxy
+git clone https://github.com/mehdic/claude-proxy.git
+cd claude-proxy
 npm install
 npm run build
 node dist/server/standalone.js
@@ -161,8 +161,8 @@ claude --version           # sanity check
 ```bash
 mkdir -p ~/.openclaw/projects
 cd ~/.openclaw/projects
-git clone https://github.com/mehdic/claude-max-api-proxy.git
-cd claude-max-api-proxy
+git clone https://github.com/mehdic/claude-proxy.git
+cd claude-proxy
 npm install
 npm run build
 ```
@@ -197,7 +197,7 @@ Save as `~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist`, replace `<HOME>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/node</string>
-    <string><HOME>/.openclaw/projects/claude-max-api-proxy/dist/server/standalone.js</string>
+    <string><HOME>/.openclaw/projects/claude-proxy/dist/server/standalone.js</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -339,7 +339,7 @@ curl -N -X POST http://127.0.0.1:3456/chat/completions \
 
 ## Run as a macOS LaunchAgent
 
-Save as `~/Library/LaunchAgents/local.claude-max-api-proxy.plist`, edit `<HOME>` and the project path, then `launchctl bootstrap gui/$(id -u) <plist>`:
+Save as `~/Library/LaunchAgents/local.claude-proxy.plist`, edit `<HOME>` and the project path, then `launchctl bootstrap gui/$(id -u) <plist>`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -347,11 +347,11 @@ Save as `~/Library/LaunchAgents/local.claude-max-api-proxy.plist`, edit `<HOME>`
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>local.claude-max-api-proxy</string>
+    <string>local.claude-proxy</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/node</string>
-        <string><HOME>/path/to/claude-max-api-proxy/dist/server/standalone.js</string>
+        <string><HOME>/path/to/claude-proxy/dist/server/standalone.js</string>
         <string>3456</string>
     </array>
     <key>EnvironmentVariables</key>
@@ -367,9 +367,9 @@ Save as `~/Library/LaunchAgents/local.claude-max-api-proxy.plist`, edit `<HOME>`
     <key>KeepAlive</key>
     <dict><key>SuccessfulExit</key><false/></dict>
     <key>StandardOutPath</key>
-    <string><HOME>/Library/Logs/claude-max-api-proxy.out.log</string>
+    <string><HOME>/Library/Logs/claude-proxy.out.log</string>
     <key>StandardErrorPath</key>
-    <string><HOME>/Library/Logs/claude-max-api-proxy.err.log</string>
+    <string><HOME>/Library/Logs/claude-proxy.err.log</string>
 </dict>
 </plist>
 ```
@@ -409,7 +409,7 @@ src/
 
 ## Fork lineage
 
-This is a fork of [`mnemon-dev/claude-max-api-proxy`](https://github.com/mnemon-dev/claude-max-api-proxy) (Atal Ashutosh, MIT) with:
+This is a fork of [`mnemon-dev/claude-max-api-proxy`](https://github.com/mnemon-dev/claude-max-api-proxy) (Atal Ashutosh, MIT, originally named `claude-max-api-proxy`) with:
 
 - An openclaw-compat fix that mounts routes both at `/chat/completions` and `/v1/chat/completions` (for clients that don't prepend `/v1`).
 - Support for Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5 model ids.
