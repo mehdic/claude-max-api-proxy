@@ -17,6 +17,8 @@ import {
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+import { attachN8nDetector } from "../n8n/detector.js";
+import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
 
 const STREAM_JSON_ENABLED = process.env.CLAUDE_PROXY_STREAM_JSON === "1";
 
@@ -321,8 +323,30 @@ async function handleStreamJsonRequest(
   const KEEPALIVE_CHECK_MS = 5_000;
   const ZWSP = "​"; // zero-width space — counts as content, renders nothing
 
-  const writeKeepaliveChunk = () => {
+  // Optional n8n awareness: if a) the proxy is configured with n8n credentials
+  // and b) we just observed claude invoke a tool that calls an n8n webhook,
+  // the keepalive payload is enriched with a real progress line instead of
+  // ZWSP. No-op when env vars unset.
+  const n8nDetector = attachN8nDetector(subprocess);
+  // Track when we last reported a particular execution so we don't repeat
+  // the exact same line on every keepalive fire.
+  let lastReportedExecution = "";
+
+  const writeKeepaliveChunk = async () => {
     if (res.writableEnded) return;
+    let content: string = ZWSP;
+    if (n8nProgressEnabled() && n8nDetector.isInFlight()) {
+      const snap = await getRunningExecution();
+      if (snap) {
+        const line = formatProgress(snap);
+        // First report or a different execution → emit visibly.
+        // Same execution again → emit ZWSP (still resets idle timer).
+        if (snap.executionId !== lastReportedExecution) {
+          content = line + " ";
+          lastReportedExecution = snap.executionId;
+        }
+      }
+    }
     const chunk = {
       id: `chatcmpl-${requestId}`,
       object: "chat.completion.chunk",
@@ -330,7 +354,7 @@ async function handleStreamJsonRequest(
       model: lastModel,
       choices: [{
         index: 0,
-        delta: isFirst ? { role: "assistant", content: ZWSP } : { content: ZWSP },
+        delta: isFirst ? { role: "assistant", content } : { content },
         finish_reason: null,
       }],
     };
@@ -364,7 +388,8 @@ async function handleStreamJsonRequest(
     ? setInterval(() => {
         if (done || res.writableEnded) return;
         if (Date.now() - lastActivityAt >= KEEPALIVE_GAP_MS) {
-          writeKeepaliveChunk();
+          // Fire-and-forget — n8n fetch is short-timeout and best-effort.
+          void writeKeepaliveChunk();
         }
       }, KEEPALIVE_CHECK_MS)
     : null;
@@ -437,6 +462,7 @@ async function handleStreamJsonRequest(
     }
   } finally {
     stopKeepalive();
+    n8nDetector.detach();
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
     subprocess.off("message", onAnyClaudeEvent);
