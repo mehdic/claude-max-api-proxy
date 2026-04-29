@@ -419,13 +419,22 @@ When the calling client (e.g. openclaw) registers MCP servers and includes their
 
 **Set `CLAUDE_PROXY_TOOLS_TRANSLATION=1`** to change that. The proxy then injects a `--mcp-config` JSON when spawning the inner claude, registering the same MCP servers the proxy knows about. The inner claude exposes those tools natively (as `mcp__<server>__<tool>`) and the model can invoke them.
 
-Currently the inline registry covers:
+### Sources of MCP-server registrations
 
-| Logical name | Activated when these env vars are set |
+The proxy collects servers from two places, in priority order:
+
+1. **`openclaw.json`'s `mcp.servers` section** (the generic path). Path defaults to `~/.openclaw/openclaw.json`, overridable via `CLAUDE_PROXY_OPENCLAW_CONFIG`. **Adding an MCP server in openclaw automatically makes it visible to the inner claude — no proxy code change.** Secret references like `{ "source": "exec", "provider": "keychain", "id": "n8n/apiKey" }` are resolved by invoking openclaw's own keychain resolver (path comes from `secrets.providers.keychain.command` in the same JSON).
+2. **Direct env vars (legacy, n8n only):** `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` register `n8n` if `openclaw.json` didn't already. Convenient because the proxy already uses these vars for the n8n-aware keepalive.
+
+The combined map is loaded once per proxy process, cached for its lifetime. Config changes require a proxy restart (matches openclaw's own hot-reload model — `mcp.servers` changes there also force a gateway restart).
+
+Useful env vars for this feature:
+
+| Variable | Purpose |
 |---|---|
-| `n8n` | `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` (re-using the keepalive's vars). Optionally `CLAUDE_PROXY_N8N_MCP_BIN` to override the binary path. |
-
-Adding a new server is a small code change in `buildOptionAMcpServers()` in `src/subprocess/stream-json-manager.ts` — usually <10 lines.
+| `CLAUDE_PROXY_TOOLS_TRANSLATION=1` | Enable. Off by default. |
+| `CLAUDE_PROXY_OPENCLAW_CONFIG` | Path to the JSON file with `mcp.servers`. Defaults to `~/.openclaw/openclaw.json`. |
+| `CLAUDE_PROXY_N8N_MCP_BIN` | Override `n8n-mcp` binary path. |
 
 ### Trade-offs
 

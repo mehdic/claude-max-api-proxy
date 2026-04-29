@@ -30,6 +30,7 @@ import type {
 } from "../types/claude-cli.js";
 import { isAssistantMessage, isResultMessage, isContentDelta } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
+import { loadOpenclawMcpServers, type ResolvedMcpServer } from "../mcp/openclaw-config.js";
 
 const INIT_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 900000;
@@ -37,20 +38,25 @@ const TURN_TIMEOUT_MS = 900000;
 /**
  * Option A MCP-server registry for `--mcp-config` injection.
  *
- * Returns the inline JSON `mcpServers` object for the inner claude CLI
- * when CLAUDE_PROXY_TOOLS_TRANSLATION=1. Each entry maps a logical server
- * name to the spawn config (command + args + env). The inner claude
- * exposes them as `mcp__<server>__<tool>` to the model.
+ * When CLAUDE_PROXY_TOOLS_TRANSLATION=1 the inner claude CLI is spawned
+ * with these MCP servers registered, so the model sees them as
+ * `mcp__<server>__<tool>` and can invoke them natively.
  *
- * Currently supports n8n via the same env vars we use for keepalive
- * progress (CLAUDE_PROXY_N8N_API_URL + CLAUDE_PROXY_N8N_API_KEY).
- * Add more entries here when other MCP servers are introduced.
+ * Sources, in priority order (later overrides earlier on name conflict):
+ *   1. openclaw.json's `mcp.servers` section, with secret refs resolved
+ *      via openclaw's own keychain resolver. This is the generic path —
+ *      adding an MCP server in openclaw automatically makes it available
+ *      to the inner claude. See src/mcp/openclaw-config.ts.
+ *   2. Direct env vars (legacy, kept for the n8n case where the proxy
+ *      already needs N8N_API_URL + N8N_API_KEY for keepalive enrichment
+ *      and we don't want to require operators to also wire it in
+ *      openclaw.json).
  */
-function buildOptionAMcpServers(): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
-  const out: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+function buildOptionAMcpServers(): Record<string, ResolvedMcpServer> {
+  const out: Record<string, ResolvedMcpServer> = { ...loadOpenclawMcpServers() };
 
-  // n8n: same path as the n8n-mcp binary openclaw spawns.
-  if (process.env.CLAUDE_PROXY_N8N_API_URL && process.env.CLAUDE_PROXY_N8N_API_KEY) {
+  // Legacy/fallback: env-var-driven n8n, only if not already set from openclaw.json.
+  if (!out.n8n && process.env.CLAUDE_PROXY_N8N_API_URL && process.env.CLAUDE_PROXY_N8N_API_KEY) {
     out.n8n = {
       command: process.env.CLAUDE_PROXY_N8N_MCP_BIN
         || "/Users/mehdichaouachi/.nvm/versions/node/v24.13.1/bin/n8n-mcp",
