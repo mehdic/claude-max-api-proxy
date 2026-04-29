@@ -636,7 +636,8 @@ export async function handleHealthDeep(_req: Request, res: Response): Promise<vo
     // health (intentional: a stream-json regression should not mask a
     // working --print fallback).
     const ok = await new Promise<boolean>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("deep probe timed out (5s)")), 5000);
+      const PROBE_TIMEOUT_MS = 15000;
+      const timer = setTimeout(() => reject(new Error(`deep probe timed out (${PROBE_TIMEOUT_MS / 1000}s)`)), PROBE_TIMEOUT_MS);
       let gotResult = false;
       sub.on("result", () => { gotResult = true; });
       sub.on("close", () => {
@@ -647,7 +648,7 @@ export async function handleHealthDeep(_req: Request, res: Response): Promise<vo
         clearTimeout(timer);
         reject(err);
       });
-      sub.start("Reply with: ok", { model: "haiku", timeout: 5000 }).catch(reject);
+      sub.start("Reply with: ok", { model: "haiku", timeout: PROBE_TIMEOUT_MS }).catch(reject);
     });
 
     const latencyMs = Date.now() - start;
