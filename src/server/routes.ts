@@ -19,8 +19,7 @@ import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
-
-const STREAM_JSON_ENABLED = process.env.CLAUDE_PROXY_STREAM_JSON === "1";
+import { resolveRuntime } from "../subprocess/runtime.js";
 
 /**
  * Handle POST /v1/chat/completions
@@ -48,7 +47,8 @@ export async function handleChatCompletions(
       return;
     }
 
-    if (STREAM_JSON_ENABLED) {
+    const runtime = resolveRuntime(req);
+    if (runtime === "stream-json") {
       const model = extractModel(body.model);
       await handleStreamJsonRequest(req, res, model, body, requestId, stream);
       return;
