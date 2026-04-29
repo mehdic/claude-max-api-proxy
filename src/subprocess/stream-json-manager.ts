@@ -34,6 +34,38 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 const INIT_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 900000;
 
+/**
+ * Option A MCP-server registry for `--mcp-config` injection.
+ *
+ * Returns the inline JSON `mcpServers` object for the inner claude CLI
+ * when CLAUDE_PROXY_TOOLS_TRANSLATION=1. Each entry maps a logical server
+ * name to the spawn config (command + args + env). The inner claude
+ * exposes them as `mcp__<server>__<tool>` to the model.
+ *
+ * Currently supports n8n via the same env vars we use for keepalive
+ * progress (CLAUDE_PROXY_N8N_API_URL + CLAUDE_PROXY_N8N_API_KEY).
+ * Add more entries here when other MCP servers are introduced.
+ */
+function buildOptionAMcpServers(): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
+  const out: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+
+  // n8n: same path as the n8n-mcp binary openclaw spawns.
+  if (process.env.CLAUDE_PROXY_N8N_API_URL && process.env.CLAUDE_PROXY_N8N_API_KEY) {
+    out.n8n = {
+      command: process.env.CLAUDE_PROXY_N8N_MCP_BIN
+        || "/Users/mehdichaouachi/.nvm/versions/node/v24.13.1/bin/n8n-mcp",
+      args: [],
+      env: {
+        N8N_API_URL: process.env.CLAUDE_PROXY_N8N_API_URL,
+        N8N_API_KEY: process.env.CLAUDE_PROXY_N8N_API_KEY,
+        MCP_MODE: "stdio",
+      },
+    };
+  }
+
+  return out;
+}
+
 export interface StreamJsonOptions {
   model: ClaudeModel;
   cwd?: string;
@@ -62,6 +94,20 @@ export class StreamJsonSubprocess extends EventEmitter {
     ];
     if (process.env.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true") {
       args.push("--dangerously-skip-permissions");
+    }
+
+    // Option A: register openclaw-known MCP servers with the inner claude
+    // CLI via --mcp-config inline JSON. Gated on
+    // CLAUDE_PROXY_TOOLS_TRANSLATION=1. Currently only the n8n MCP server
+    // is supported; new servers can be added here when their env vars are
+    // present. The CLI executes these tools internally — openclaw's audit
+    // and approval do NOT see these calls. Documented trade-off; see
+    // README "Tools translation modes".
+    if (process.env.CLAUDE_PROXY_TOOLS_TRANSLATION === "1") {
+      const mcpServers = buildOptionAMcpServers();
+      if (Object.keys(mcpServers).length > 0) {
+        args.push("--mcp-config", JSON.stringify({ mcpServers }));
+      }
     }
 
     this.model = options.model;
