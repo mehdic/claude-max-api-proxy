@@ -6,7 +6,8 @@
 
 import express, { Express, Request, Response, NextFunction } from "express";
 import { createServer, Server } from "http";
-import { handleChatCompletions, handleModels, handleHealth } from "./routes.js";
+import { handleChatCompletions, handleModels, handleHealth, handleHealthDeep } from "./routes.js";
+import { handleMetrics } from "./metrics.js";
 
 export interface ServerConfig {
   port: number;
@@ -48,6 +49,8 @@ function createApp(): Express {
   // Routes — register both /v1/* and /* paths so clients that omit the
   // /v1 prefix (e.g. OpenCLAW's openai-completions provider) still work.
   app.get("/health", handleHealth);
+  app.get("/healthz/deep", handleHealthDeep);
+  app.get("/metrics", handleMetrics);
   app.get("/v1/models", handleModels);
   app.get("/models", handleModels);
   app.post("/v1/chat/completions", handleChatCompletions);
