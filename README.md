@@ -127,6 +127,9 @@ CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 | `CLAUDE_PROXY_STREAM_JSON` | unset (off) | `1` to switch to persistent NDJSON transport with multi-turn cache reuse. |
 | `CLAUDE_PROXY_PREWARM_MODELS` | `claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001` | Comma-separated model ids to pre-initialize at boot (stream-json mode only). |
 | `CLAUDE_PROXY_INIT_POOL` | unset (on) | `0` to disable the per-model init pool (stream-json mode only). |
+| `CLAUDE_PROXY_N8N_API_URL` | unset | Optional. e.g. `http://n8n.orb.local:5678/api/v1`. When this and the API key are both set, the proxy enriches keepalive chunks with real workflow progress from n8n during long Bash-curl-to-webhook calls (see "n8n-aware keepalive" below). |
+| `CLAUDE_PROXY_N8N_API_KEY` | unset | Optional. n8n API key (Settings → n8n API in n8n UI). Required alongside `CLAUDE_PROXY_N8N_API_URL`. |
+| `CLAUDE_PROXY_N8N_DETECTION_PATTERN` | `n8n.*\/webhook\/` | Optional regex (case-insensitive). Matched against claude's tool input to decide when an n8n call is in flight. Override if your webhook URLs don't contain "n8n". |
 
 #### Caveats
 
@@ -372,6 +375,32 @@ Save as `~/Library/LaunchAgents/local.claude-proxy.plist`, edit `<HOME>` and the
     <string><HOME>/Library/Logs/claude-proxy.err.log</string>
 </dict>
 </plist>
+```
+
+## n8n-aware keepalive (optional)
+
+When stream-json mode is on, the proxy emits invisible keepalive chunks every ~10 s of claude silence so consumers don't trip an LLM-idle timeout (see "stream-json mode" above). For one specific case — claude has invoked its `Bash` tool to `curl` an n8n webhook and is now sitting blocked waiting on the workflow — the keepalive can do something more useful than emit zero-width spaces: it can poll n8n's REST API and surface real workflow progress.
+
+How it works:
+
+1. The proxy watches every `content_block_start` / `content_block_delta` event from claude. When a tool_use input matches `CLAUDE_PROXY_N8N_DETECTION_PATTERN` (default: `n8n.*\/webhook\/`), it flags the next ~30s as "n8n in flight".
+2. While that window is open and `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` are both set, each keepalive fire calls `GET /executions?status=running&limit=1` (3-second cache) to find the most recently started running execution.
+3. The keepalive chunk's `delta.content` becomes a one-line status (`[n8n: <workflow name> · <elapsed>s · exec <id>]`) instead of `​`. Visible to the consumer; resets the LLM-idle timer; tells the user something useful is happening.
+4. The same execution id is only reported once per turn — subsequent keepalives revert to ZWSP — so the response doesn't get spammed with duplicate status lines.
+
+Best-effort by design: any HTTP error, timeout, or no-running-execution result silently falls back to a regular ZWSP keepalive. The feature is **opt-in** via the env vars and a no-op when they're unset.
+
+Sample flow (claude calling an n8n workflow that takes ~90 s):
+
+```
+T=0s    user message arrives
+T=2s    claude emits Bash tool_use with curl https://n8n.../webhook/abc...
+T=3s    detector flags "n8n in flight"
+T=12s   keepalive fires → emits "[n8n: my-workflow · 9s elapsed · exec 73] "
+T=22s   keepalive fires → ZWSP (same execution, already reported)
+…
+T=90s   curl returns, claude resumes generation
+T=95s   final assistant text streamed normally
 ```
 
 ## Long-running tools — use MCP polling, not blocking calls
