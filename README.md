@@ -90,32 +90,42 @@ The proxy passes the model id straight through to `claude --model`:
 
 `GET /models` (or `/v1/models`) returns the live list.
 
-## Two transport modes
+## Runtime modes
 
-The proxy ships with two ways of talking to `claude`. Pick based on whether you care about multi-turn caching for chat workloads.
+Two subprocess strategies. **`stream-json` is the production default;** `--print` is the incident-response escape hatch.
 
-### `--print` mode (default — works out of the box)
+### `stream-json` mode (default)
 
-Each request spawns a fresh `claude --print` subprocess. Reliable, simple, no surprises.
+Set `CLAUDE_PROXY_RUNTIME=stream-json` (or leave unset — it's the default). The proxy uses a persistent NDJSON transport (`claude --input-format stream-json`) and a session pool, so one subprocess survives across multiple turns of the same conversation:
 
-Active optimizations:
-- Cache stats are surfaced in `usage.prompt_tokens_details.cached_tokens` so you can see Anthropic's prompt cache fire (~88% hit on system prompt + tools after the first call).
-- `--exclude-dynamic-system-prompt-sections` is passed to `claude` automatically, which moves per-machine bits (cwd, env info, git status) out of the cached system prompt so the cache hash matches across hosts and runs.
-
-Trade-off: each request pays a ~5s subprocess cold start. Fine for chat, not great if you need sub-second latency.
-
-### `stream-json` mode (opt-in, recommended for chat)
-
-Set `CLAUDE_PROXY_STREAM_JSON=1` and the proxy switches to a persistent NDJSON transport (`claude --input-format stream-json`). One subprocess survives across multiple turns of the same conversation, so:
-
-- **Conversation history caches turn-to-turn.** Empirical: a 3-turn chat went from `cache_read=0` (turn 1) → `cache_read=70K` (turn 2) → `cache_read=70K` (turn 3) — 99.9% of input tokens served from Anthropic's prompt cache.
+- **Conversation history caches turn-to-turn.** Empirical: a 3-turn chat went from `cache_read=0` (turn 1) → `cache_read=70K` (turn 2) → `cache_read=70K` (turn 3) — ~99.9% of input tokens served from Anthropic's prompt cache.
 - **Warm latency drops from ~5s to ~1.6s** because the next turn skips the spawn + handshake.
 - **Cold turns are also faster** (~2.9s) because the proxy keeps a per-model pre-initialized "init pool" — the 5s init handshake happens once at startup, not per request.
-- **SSE keepalives** (`:keepalive\n\n`) are emitted every 1s during the cold gap so OpenAI clients with short idle timeouts don't disconnect.
+- **3-layer keepalive** (eager handshake → activity-bound tracker → periodic ZWSP delta) keeps OpenAI clients from tripping their LLM-idle timeout during long claude turns.
 
-Enable:
+### `--print` mode (fallback)
+
+Set `CLAUDE_PROXY_RUNTIME=print`. Each request spawns a fresh `claude --print` subprocess. Higher latency (~5s/request, no warm pool), but **bulletproof**: zero session state, zero pool fingerprint drift, zero stream parser surface area. Flip here when stream-json regresses upstream — CLI flag rename, JSON shape change, transport bug.
+
+The fallback path is also the target of the optional `CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE=1` opt-in: when set, a request that hits a recognized stream-layer fault (worker died before first token, init handshake timeout, spawn ENOENT, etc.) before any SSE bytes have been committed retries on `--print` once. Real model errors (rate limit, auth, content policy) are NOT subject to fallback — they reach the client unchanged.
+
+Active in both modes:
+- Cache stats surfaced in `usage.prompt_tokens_details.cached_tokens` so you can see Anthropic's prompt cache fire.
+- `--exclude-dynamic-system-prompt-sections` passed to `claude` so per-machine sections don't bust the cache hash.
+
+### Flipping modes
+
 ```bash
-CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
+# default (stream-json)
+node dist/server/standalone.js
+
+# explicit print mode
+CLAUDE_PROXY_RUNTIME=print node dist/server/standalone.js
+
+# allow per-request override via header (off by default)
+CLAUDE_PROXY_ALLOW_RUNTIME_OVERRIDE=1 node dist/server/standalone.js
+# then:
+curl -H 'X-Claude-Proxy-Runtime: print' …
 ```
 
 ### Environment variables
@@ -124,9 +134,14 @@ CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 |----------|---------|--------|
 | `CLAUDE_PROXY_PORT` | `3456` | Port to listen on. CLI arg (`node standalone.js 3458`) takes precedence if also given. |
 | `CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | unset | `true` to pass `--dangerously-skip-permissions` to `claude`. Required for headless / LaunchAgent operation since there's no TTY for permission prompts. |
-| `CLAUDE_PROXY_STREAM_JSON` | unset (off) | `1` to switch to persistent NDJSON transport with multi-turn cache reuse. |
+| `CLAUDE_PROXY_RUNTIME` | `stream-json` | `stream-json` (default) or `print`. Picks the subprocess strategy. See "Runtime modes" above. |
+| `CLAUDE_PROXY_STREAM_JSON` | unset | Legacy alias. `0` forces print mode for backward compatibility with older LaunchAgent envs. Prefer `CLAUDE_PROXY_RUNTIME`. |
+| `CLAUDE_PROXY_ALLOW_RUNTIME_OVERRIDE` | unset | `1` to honor `X-Claude-Proxy-Runtime: print\|stream-json` request header for per-call debugging. Off by default. |
+| `CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE` | unset (off) | `1` to retry on `--print` once when stream-json hits a recognized stream-layer fault before any SSE bytes are committed. |
 | `CLAUDE_PROXY_PREWARM_MODELS` | `claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001` | Comma-separated model ids to pre-initialize at boot (stream-json mode only). |
 | `CLAUDE_PROXY_INIT_POOL` | unset (on) | `0` to disable the per-model init pool (stream-json mode only). |
+| `CLAUDE_PROXY_POOL_TTL_MS` | `600000` (10 min) | Idle TTL for session-pool workers. Floored at 360_000 (6 min) so we never evict mid-Anthropic-cache-window. |
+| `CLAUDE_PROXY_POOL_MAX` | `4` | Max concurrent live workers in the session pool. LRU evicts oldest when adding past cap. |
 | `CLAUDE_PROXY_N8N_API_URL` | unset | Optional. e.g. `http://n8n.orb.local:5678/api/v1`. When this and the API key are both set, the proxy enriches keepalive chunks with real workflow progress from n8n during long Bash-curl-to-webhook calls (see "n8n-aware keepalive" below). |
 | `CLAUDE_PROXY_N8N_API_KEY` | unset | Optional. n8n API key (Settings → n8n API in n8n UI). Required alongside `CLAUDE_PROXY_N8N_API_URL`. |
 | `CLAUDE_PROXY_N8N_DETECTION_PATTERN` | `n8n.*\/webhook\/` | Optional regex (case-insensitive). Matched against claude's tool input to decide when an n8n call is in flight. Override if your webhook URLs don't contain "n8n". |
@@ -140,9 +155,28 @@ CLAUDE_PROXY_STREAM_JSON=1 node dist/server/standalone.js
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Liveness probe |
+| `/health` | GET | Cheap liveness probe — process up + port bound. No subprocess work. |
+| `/healthz/deep` | GET | Real probe — spawns a `claude --print` with a trivial prompt + 5s budget. Returns `200 {ok, latency_ms, runtime, pool, last_success_ts}` on success, `503 {ok: false, error, …}` on failure. Use for watchdogs. |
+| `/metrics` | GET | Prometheus exposition. See "Metrics" below. |
 | `/models`, `/v1/models` | GET | List served model ids |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
+
+### Metrics
+
+`/metrics` exposes (cardinality-bounded):
+
+- `claude_proxy_requests_total{runtime,model,status}`
+- `claude_proxy_request_duration_seconds{runtime,model,status}` — histogram, 100 ms → 2 min buckets
+- `claude_proxy_stream_fallback_total{reason}`
+- `claude_proxy_pool_size{state="live"|"max"}` — gauge
+- `claude_proxy_pool_ttl_evictions_total`
+- `claude_proxy_pool_lru_evictions_total`
+- `claude_proxy_pool_fingerprint_mismatches_total`
+- `claude_proxy_pool_warm_hits_total`, `_cold_spawns_total`
+- `claude_proxy_subprocess_spawn_failures_total{runtime}`
+- `claude_proxy_runtime_default{runtime}` — gauge, 0/1
+
+The `model` label is canonicalized to a fixed set; unknown ids collapse to `other`. Reasons come from a fixed allowlist. No per-request labels.
 
 ## Wiring up clients
 
