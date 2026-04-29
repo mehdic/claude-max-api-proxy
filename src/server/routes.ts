@@ -19,7 +19,9 @@ import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
-import { resolveRuntime } from "../subprocess/runtime.js";
+import { resolveRuntime, defaultRuntime } from "../subprocess/runtime.js";
+import { poolStats } from "../subprocess/session-pool.js";
+import { recordRequest, recordSpawnFailure } from "./metrics.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -55,6 +57,23 @@ function isStreamLayerFault(err: unknown): boolean {
   );
 }
 
+/**
+ * Reduce arbitrary client-provided model strings to one of a fixed set of
+ * label values for /metrics. Bounded cardinality is critical — we never want
+ * /metrics to grow unbounded labels from random model strings.
+ */
+const KNOWN_MODEL_LABELS = new Set([
+  "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4",
+  "claude-sonnet-4-6", "claude-sonnet-4",
+  "claude-haiku-4-5-20251001", "claude-haiku-4-5", "claude-haiku-4",
+]);
+function canonicalizeModelLabel(model: string | undefined): string {
+  if (!model) return "unknown";
+  // Strip provider prefix (claude-proxy/ or claude-code-cli/).
+  const stripped = model.replace(/^(claude-proxy|claude-code-cli)\//, "");
+  return KNOWN_MODEL_LABELS.has(stripped) ? stripped : "other";
+}
+
 function classifyFallbackReason(err: unknown): string {
   if (!(err instanceof Error)) return "unknown";
   const msg = err.message.toLowerCase();
@@ -80,6 +99,14 @@ export async function handleChatCompletions(
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
+  const reqStart = Date.now();
+  let usedRuntime: "stream-json" | "print" = "stream-json";
+  // Attempt to record metrics on response close, regardless of branch taken.
+  res.on("close", () => {
+    const status: "ok" | "error" = res.statusCode >= 400 ? "error" : "ok";
+    const canonModel = canonicalizeModelLabel(body.model);
+    recordRequest({ runtime: usedRuntime, model: canonModel, status, durationMs: Date.now() - reqStart });
+  });
 
   try {
     // Validate request
@@ -95,6 +122,8 @@ export async function handleChatCompletions(
     }
 
     const runtime = resolveRuntime(req);
+    usedRuntime = runtime;
+    if (process.env.DEBUG) console.error(`[runtime] resolved=${runtime} req_id=${requestId}`);
 
     if (runtime === "stream-json") {
       const model = extractModel(body.model);
@@ -125,9 +154,16 @@ export async function handleChatCompletions(
       }
     }
 
-    // --print path (default fallback / runtime override)
+    // --print path (default fallback / runtime override / fallback retry)
+    usedRuntime = "print";
     const cliInput = openaiToCli(body);
-    const subprocess = await acquireSubprocess(cliInput.model);
+    let subprocess: ClaudeSubprocess;
+    try {
+      subprocess = await acquireSubprocess(cliInput.model);
+    } catch (err) {
+      recordSpawnFailure("print");
+      throw err;
+    }
 
     if (stream) {
       await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
@@ -567,7 +603,9 @@ export function handleModels(_req: Request, res: Response): void {
 /**
  * Handle GET /health
  *
- * Health check endpoint
+ * Cheap liveness probe — returns immediately. Confirms the process is up
+ * and the HTTP listener is bound. No subprocess work. Use this for
+ * load-balancer-style health checks.
  */
 export function handleHealth(_req: Request, res: Response): void {
   res.json({
@@ -575,4 +613,62 @@ export function handleHealth(_req: Request, res: Response): void {
     provider: "claude-code-cli",
     timestamp: new Date().toISOString(),
   });
+}
+
+// Module-level state for /healthz/deep — remembers the last successful
+// deep-probe time so a failed probe can report when things last worked.
+let lastDeepProbeSuccessAt: number = 0;
+
+/**
+ * Handle GET /healthz/deep
+ *
+ * Real probe — spawns a `claude --print` with a trivial prompt and a 5s
+ * budget. Returns 200 with latency + pool stats on success, 503 with the
+ * error and the last-success timestamp on failure. Use for the LaunchAgent
+ * watchdog and openclaw probes — anything that needs to know whether the
+ * proxy can actually serve a request, not just that the port is bound.
+ */
+export async function handleHealthDeep(_req: Request, res: Response): Promise<void> {
+  const start = Date.now();
+  try {
+    const sub = new ClaudeSubprocess();
+    // Plain --print path so /healthz/deep is independent of stream-json
+    // health (intentional: a stream-json regression should not mask a
+    // working --print fallback).
+    const ok = await new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("deep probe timed out (5s)")), 5000);
+      let gotResult = false;
+      sub.on("result", () => { gotResult = true; });
+      sub.on("close", () => {
+        clearTimeout(timer);
+        gotResult ? resolve(true) : reject(new Error("subprocess closed without result"));
+      });
+      sub.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      sub.start("Reply with: ok", { model: "haiku", timeout: 5000 }).catch(reject);
+    });
+
+    const latencyMs = Date.now() - start;
+    if (ok) lastDeepProbeSuccessAt = Date.now();
+
+    res.json({
+      ok: true,
+      latency_ms: latencyMs,
+      runtime: defaultRuntime(),
+      pool: poolStats(),
+      last_success_ts: lastDeepProbeSuccessAt,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(503).json({
+      ok: false,
+      error: message,
+      latency_ms: Date.now() - start,
+      runtime: defaultRuntime(),
+      pool: poolStats(),
+      last_success_ts: lastDeepProbeSuccessAt || null,
+    });
+  }
 }
