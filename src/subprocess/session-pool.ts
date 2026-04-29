@@ -27,14 +27,49 @@ import { acquirePreInit } from "./init-pool.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import type { OpenAIChatMessage, OpenAIMessageContent } from "../types/openai.js";
 
-const IDLE_TTL_MS = 6 * 60 * 1000; // ~1min past Anthropic's 5min cache TTL — enough buffer that we don't evict mid-window from clock skew or in-flight handoff, but not so long we hold dead subprocesses for cache-miss-anyway gaps
-const MAX_SESSIONS = 8;
+// Pool TTL is the longer of CLAUDE_PROXY_POOL_TTL_MS (default 600_000 = 10
+// min, per the operator's preference) and our internal floor of 6 min (~1 min
+// past Anthropic's 5-min prompt-cache TTL — anything tighter risks evicting
+// mid-cache-window from clock skew). The 10-min default stretches over
+// natural pause windows in chat without holding dead processes through
+// cache-miss-anyway gaps.
+const FLOOR_TTL_MS = 6 * 60 * 1000;
+const IDLE_TTL_MS = Math.max(
+  FLOOR_TTL_MS,
+  parseInt(process.env.CLAUDE_PROXY_POOL_TTL_MS || "600000", 10) || 600_000,
+);
+// Cap concurrent live workers. Operator override via CLAUDE_PROXY_POOL_MAX.
+// When the cap is hit, new conversations cold-spawn instead of joining the
+// pool — overflow is graceful, not a failure.
+const MAX_SESSIONS = (() => {
+  const raw = parseInt(process.env.CLAUDE_PROXY_POOL_MAX || "4", 10);
+  return raw > 0 ? raw : 4;
+})();
 
 interface Slot {
   subprocess: StreamJsonSubprocess;
   key: string;
   lastUsedAt: number;
+  // Fingerprint snapshot taken at insertion time. We compare against this
+  // when checking out a worker; any drift (model rename, env change between
+  // request and re-use) routes the request to a cold spawn instead of
+  // reusing a worker whose init context no longer matches.
+  fingerprint: SlotFingerprint;
 }
+
+interface SlotFingerprint {
+  model: ClaudeModel;
+}
+
+// Bounded counters for /metrics. Module-scoped; the metrics endpoint reads
+// them. Keep cardinality fixed (no per-request labels here).
+export const poolCounters = {
+  ttlEvictions: 0,
+  lruEvictions: 0,
+  fingerprintMismatches: 0,
+  warmHits: 0,
+  coldSpawns: 0,
+};
 
 const slots: Map<string, Slot> = new Map();
 
@@ -68,24 +103,33 @@ export async function acquireSession(
   const postTurnKey = hashConversation(model, messages); // before assistant response — see note below
 
   const slot = slots.get(priorKey);
-  if (slot && slot.subprocess.isHealthy() && slot.subprocess.getModel() === model) {
-    console.error(`[SessionPool] WARM HIT model=${model} key=${priorKey.slice(0, 8)}`);
-    slots.delete(priorKey);
-    return {
-      subprocess: slot.subprocess,
-      isWarm: true,
-      flattenedPrompt: null,
-      lastUserText,
-      postTurnKey,
-    };
-  }
-
   if (slot) {
-    console.error(`[SessionPool] Stale slot for ${priorKey.slice(0, 8)}, killing`);
+    // Healthy + fingerprint match → warm hit. Anything else → fall back cold.
+    const fingerprintOk = slot.fingerprint.model === model
+      && slot.subprocess.getModel() === model;
+    if (slot.subprocess.isHealthy() && fingerprintOk) {
+      console.error(`[SessionPool] WARM HIT model=${model} key=${priorKey.slice(0, 8)}`);
+      poolCounters.warmHits++;
+      slots.delete(priorKey);
+      return {
+        subprocess: slot.subprocess,
+        isWarm: true,
+        flattenedPrompt: null,
+        lastUserText,
+        postTurnKey,
+      };
+    }
+    if (!fingerprintOk) {
+      console.error(`[SessionPool] FINGERPRINT MISMATCH key=${priorKey.slice(0, 8)} stored.model=${slot.fingerprint.model} requested.model=${model} — routing to cold`);
+      poolCounters.fingerprintMismatches++;
+    } else {
+      console.error(`[SessionPool] Stale slot for ${priorKey.slice(0, 8)}, killing`);
+    }
     slot.subprocess.kill();
     slots.delete(priorKey);
   }
 
+  poolCounters.coldSpawns++;
   return cold(model, messages, postTurnKey);
 }
 
@@ -132,8 +176,18 @@ export function returnSession(
     { role: "assistant", content: assistantContent },
   ];
   const postKey = hashConversation(model, fullMessages);
-  slots.set(postKey, { subprocess, key: postKey, lastUsedAt: Date.now() });
-  console.error(`[SessionPool] Returned subprocess under key ${postKey.slice(0, 8)} (size=${slots.size})`);
+  slots.set(postKey, {
+    subprocess,
+    key: postKey,
+    lastUsedAt: Date.now(),
+    fingerprint: { model },
+  });
+  console.error(`[SessionPool] Returned subprocess under key ${postKey.slice(0, 8)} (size=${slots.size}/${MAX_SESSIONS})`);
+}
+
+/** Snapshot the pool state for /metrics and /healthz/deep. */
+export function poolStats(): { size: number; max: number; ttlMs: number } {
+  return { size: slots.size, max: MAX_SESSIONS, ttlMs: IDLE_TTL_MS };
 }
 
 /** Discard a subprocess (e.g., after error) without re-pooling. */
@@ -146,7 +200,8 @@ function evictExpired(): void {
   const now = Date.now();
   for (const [k, s] of slots) {
     if (now - s.lastUsedAt > IDLE_TTL_MS || !s.subprocess.isHealthy()) {
-      console.error(`[SessionPool] Evicting expired ${k.slice(0, 8)} (age=${now - s.lastUsedAt}ms)`);
+      console.error(`[SessionPool] TTL evict ${k.slice(0, 8)} (age=${now - s.lastUsedAt}ms, ttl=${IDLE_TTL_MS}ms)`);
+      poolCounters.ttlEvictions++;
       s.subprocess.kill();
       slots.delete(k);
     }
@@ -160,7 +215,8 @@ function evictLRU(): void {
       if (!oldest || s.lastUsedAt < oldest.t) oldest = { key: k, t: s.lastUsedAt };
     }
     if (!oldest) return;
-    console.error(`[SessionPool] LRU evict ${oldest.key.slice(0, 8)}`);
+    console.error(`[SessionPool] LRU evict ${oldest.key.slice(0, 8)} (cap=${MAX_SESSIONS})`);
+    poolCounters.lruEvictions++;
     slots.get(oldest.key)?.subprocess.kill();
     slots.delete(oldest.key);
   }
