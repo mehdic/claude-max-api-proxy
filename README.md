@@ -145,6 +145,8 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `CLAUDE_PROXY_N8N_API_URL` | unset | Optional. e.g. `http://n8n.example.com:5678/api/v1`. When this and the API key are both set, the proxy enriches keepalive chunks with real workflow progress from n8n during long Bash-curl-to-webhook calls (see "n8n-aware keepalive" below). |
 | `CLAUDE_PROXY_N8N_API_KEY` | unset | Optional. n8n API key (Settings → n8n API in n8n UI). Required alongside `CLAUDE_PROXY_N8N_API_URL`. |
 | `CLAUDE_PROXY_N8N_DETECTION_PATTERN` | `n8n.*\/webhook\/` | Optional regex (case-insensitive). Matched against claude's tool input to decide when an n8n call is in flight. Override if your webhook URLs don't contain "n8n". |
+| `CLAUDE_PROXY_TOOLS_TRANSLATION` | unset (off) | `1` to register openclaw-known MCP servers with the inner claude CLI via `--mcp-config` injection. Currently registers `n8n` if `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` are set. The inner claude exposes them as `mcp__n8n__<tool>`. **Trade-off:** claude executes these tools internally — openclaw's audit / approval / per-agent allowlist do NOT see the calls. See "Tools translation modes" below. |
+| `CLAUDE_PROXY_N8N_MCP_BIN` | `n8n-mcp` | Override the path to the `n8n-mcp` binary if not at the default nvm location. |
 
 #### Caveats
 
@@ -410,6 +412,33 @@ Save as `~/Library/LaunchAgents/local.claude-proxy.plist`, edit `<HOME>` and the
 </dict>
 </plist>
 ```
+
+## Tools translation modes (optional)
+
+When the calling client (e.g. openclaw) registers MCP servers and includes their tool schemas in the OpenAI request, the proxy by default **strips the `tools[]` field** before invoking the inner `claude` CLI — the inner claude doesn't know those tools exist. This is the safe default; the trade-off is that agents (the agent et al.) can't actually call the openclaw-registered MCPs from inside the claude subprocess.
+
+**Set `CLAUDE_PROXY_TOOLS_TRANSLATION=1`** to change that. The proxy then injects a `--mcp-config` JSON when spawning the inner claude, registering the same MCP servers the proxy knows about. The inner claude exposes those tools natively (as `mcp__<server>__<tool>`) and the model can invoke them.
+
+Currently the inline registry covers:
+
+| Logical name | Activated when these env vars are set |
+|---|---|
+| `n8n` | `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` (re-using the keepalive's vars). Optionally `CLAUDE_PROXY_N8N_MCP_BIN` to override the binary path. |
+
+Adding a new server is a small code change in `buildOptionAMcpServers()` in `src/subprocess/stream-json-manager.ts` — usually <10 lines.
+
+### Trade-offs
+
+- ✅ The inner claude understands tool calling natively → high quality.
+- ✅ OpenClaw agents can list, trigger, and poll n8n workflows directly.
+- ❌ The CLI executes the tool **locally**, inside the claude subprocess. **The calling client's audit / approval / per-agent allowlist do NOT see these calls** — they're invisible to openclaw's tool dispatcher.
+- ❌ Every spawned claude subprocess loads the MCP server fresh (~5 s extra per cold spawn for a heavyweight MCP). Stream-json mode amortizes this across the session.
+
+### Why not full translation back to OpenAI `tool_calls`?
+
+A previous plan (`docs/PLAN-tools-translation.md`) explored real translation: intercept claude's `tool_use` events in stream-json output, surface them to the client as OpenAI `tool_calls`, await `role: tool` follow-up, translate back to MCP. A 3-agent review on PR #2 confirmed that **claude `--input-format stream-json` does NOT emit `tool_use` events before executing the tool locally** — the CLI auto-executes and only surfaces tool_use+tool_result together as part of the final assistant message. There's no `--no-execute-tools` flag and no permission-callback hook.
+
+Without forking the CLI, full translation isn't buildable. Option A (this section) is the practical answer; the audit gap is a documented trade-off, not a bug.
 
 ## n8n-aware keepalive (optional)
 
