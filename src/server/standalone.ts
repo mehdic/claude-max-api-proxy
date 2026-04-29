@@ -11,6 +11,7 @@
 import { startServer, stopServer } from "./index.js";
 import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
 import { preWarm } from "../subprocess/init-pool.js";
+import { defaultRuntime } from "../subprocess/runtime.js";
 
 const DEFAULT_PORT = 3456;
 
@@ -51,10 +52,10 @@ async function main(): Promise<void> {
   // Start server
   try {
     await startServer({ port });
-    // Pre-warm the stream-json init-pool when that mode is on. Each model
-    // gets one already-initialized subprocess so first conversations skip
-    // the ~5s init handshake. No-op when CLAUDE_PROXY_STREAM_JSON != "1".
-    if (process.env.CLAUDE_PROXY_STREAM_JSON === "1") {
+    // Pre-warm the stream-json init-pool when that mode is the default. Each
+    // model gets one already-initialized subprocess so first conversations
+    // skip the ~5s init handshake. No-op when default runtime is "print".
+    if (defaultRuntime() === "stream-json") {
       const models = (process.env.CLAUDE_PROXY_PREWARM_MODELS || "claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001")
         .split(",")
         .map((s) => s.trim())
