@@ -21,6 +21,53 @@ import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
 import { resolveRuntime } from "../subprocess/runtime.js";
 
+const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
+
+// Counters for /metrics. Keep cardinality fixed.
+export const fallbackCounters = {
+  total: 0,
+  byReason: {} as Record<string, number>,
+};
+
+/**
+ * Decide whether a thrown error looks like a stream-layer fault (worth
+ * retrying via --print) vs a real model-layer error (rate limit, auth,
+ * content policy — should surface to the client).
+ *
+ * Stream-layer faults bubble up as thrown exceptions from acquireSession,
+ * StreamJsonSubprocess.start, or submitTurn. Model-layer errors come back
+ * inside the `result` event with is_error=true and are surfaced through the
+ * normal response shape — they do NOT throw, so they don't reach this guard.
+ */
+function isStreamLayerFault(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  // Allowlist of patterns we trust to be transport faults.
+  return (
+    msg.includes("subprocess closed before result")
+    || msg.includes("init handshake timed out")
+    || msg.includes("subprocess not initialized")
+    || msg.includes("subprocess is dead")
+    || msg.includes("stdin not writable")
+    || msg.includes("claude cli not found")
+    || msg.includes("turn timed out")
+    || msg.includes("control error")
+  );
+}
+
+function classifyFallbackReason(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown";
+  const msg = err.message.toLowerCase();
+  if (msg.includes("init handshake")) return "init_handshake_timeout";
+  if (msg.includes("subprocess closed before result")) return "worker_died";
+  if (msg.includes("turn timed out")) return "turn_timeout";
+  if (msg.includes("claude cli not found")) return "spawn_enoent";
+  if (msg.includes("stdin not writable")) return "stdin_closed";
+  if (msg.includes("subprocess not initialized") || msg.includes("subprocess is dead")) return "worker_invalid";
+  if (msg.includes("control error")) return "control_protocol";
+  return "other_stream_fault";
+}
+
 /**
  * Handle POST /v1/chat/completions
  *
@@ -48,17 +95,38 @@ export async function handleChatCompletions(
     }
 
     const runtime = resolveRuntime(req);
+
     if (runtime === "stream-json") {
       const model = extractModel(body.model);
-      await handleStreamJsonRequest(req, res, model, body, requestId, stream);
-      return;
+      try {
+        await handleStreamJsonRequest(req, res, model, body, requestId, stream);
+        return;
+      } catch (err) {
+        // Auto-fallback: only fires when CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE=1,
+        // the failure is a recognized stream-layer fault, AND no SSE bytes
+        // have been committed to the client yet. Drops through to the --print
+        // path below. One retry max — the print path doesn't auto-fall-back.
+        if (
+          FALLBACK_ENABLED
+          && !res.headersSent
+          && !res.writableEnded
+          && isStreamLayerFault(err)
+        ) {
+          fallbackCounters.byReason[classifyFallbackReason(err)] =
+            (fallbackCounters.byReason[classifyFallbackReason(err)] || 0) + 1;
+          fallbackCounters.total++;
+          console.warn(
+            `[stream_fallback] reason=${classifyFallbackReason(err)} req_id=${requestId} err="${(err as Error).message}"`,
+          );
+          // fall through to --print path below
+        } else {
+          throw err;
+        }
+      }
     }
 
-    // Convert to CLI input format
+    // --print path (default fallback / runtime override)
     const cliInput = openaiToCli(body);
-
-    // Acquire a (possibly warm) prepared subprocess. Cold path falls back to
-    // spawning here; warm path skips the ~1.5s claude bootstrap.
     const subprocess = await acquireSubprocess(cliInput.model);
 
     if (stream) {
