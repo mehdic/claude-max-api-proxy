@@ -3,7 +3,8 @@
  */
 
 import type { ClaudeCliAssistant, ClaudeCliResult } from "../types/claude-cli.js";
-import type { OpenAIChatResponse, OpenAIChatChunk, OpenAIUsage } from "../types/openai.js";
+import type { OpenAIChatRequest, OpenAIChatResponse, OpenAIChatChunk, OpenAIUsage, OpenAIToolCall } from "../types/openai.js";
+import { parseToolCalls, shouldBridgeExternalTools } from "./tools.js";
 
 /**
  * Extract text content from Claude CLI assistant message
@@ -46,7 +47,12 @@ export function cliToOpenaiChunk(
 /**
  * Create a final "done" chunk for streaming
  */
-export function createDoneChunk(requestId: string, model: string, usage?: OpenAIUsage | null): OpenAIChatChunk {
+export function createDoneChunk(
+  requestId: string,
+  model: string,
+  usage?: OpenAIUsage | null,
+  finishReason: "stop" | "tool_calls" = "stop",
+): OpenAIChatChunk {
   return {
     id: `chatcmpl-${requestId}`,
     object: "chat.completion.chunk",
@@ -56,7 +62,7 @@ export function createDoneChunk(requestId: string, model: string, usage?: OpenAI
       {
         index: 0,
         delta: {},
-        finish_reason: "stop",
+        finish_reason: finishReason,
       },
     ],
     ...(usage !== undefined ? { usage } : {}),
@@ -64,11 +70,54 @@ export function createDoneChunk(requestId: string, model: string, usage?: OpenAI
 }
 
 /**
- * Convert Claude CLI result to OpenAI non-streaming response
+ * Create streaming chunks for tool_calls detected in accumulated text.
+ * Returns an array of SSE-ready chunk objects — one per tool call with the
+ * full function name + arguments in a single chunk (non-incremental).
+ */
+export function createToolCallChunks(
+  requestId: string,
+  model: string,
+  toolCalls: OpenAIToolCall[],
+): OpenAIChatChunk[] {
+  return toolCalls.map((tc, idx) => ({
+    id: `chatcmpl-${requestId}`,
+    object: "chat.completion.chunk" as const,
+    created: Math.floor(Date.now() / 1000),
+    model: normalizeModelName(model),
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: idx,
+              id: tc.id,
+              type: "function" as const,
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+              },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+  }));
+}
+
+/**
+ * Convert Claude CLI result to OpenAI non-streaming response.
+ *
+ * When `hasTools` is true, scans the result text for tool_call JSON blocks
+ * and converts them to OpenAI-format tool_calls. The remaining text (if any)
+ * becomes the content field; if the entire response is tool calls, content
+ * is set to null.
  */
 export function cliResultToOpenai(
   result: ClaudeCliResult,
-  requestId: string
+  requestId: string,
+  toolRequest?: Pick<OpenAIChatRequest, "tools" | "tool_choice">,
 ): OpenAIChatResponse {
   // Get model from modelUsage or default
   const modelName = result.modelUsage
@@ -76,6 +125,22 @@ export function cliResultToOpenai(
     : "claude-sonnet-4";
 
   const usage = resultUsageToOpenAI(result);
+  const rawText = ensureString(result.result);
+
+  let content: string | null = rawText;
+  let toolCalls: OpenAIToolCall[] | undefined;
+  let finishReason: "stop" | "tool_calls" = "stop";
+
+  if (toolRequest && shouldBridgeExternalTools(toolRequest)) {
+    const parsed = parseToolCalls(rawText, toolRequest);
+    if (parsed.toolCalls.length > 0) {
+      toolCalls = parsed.toolCalls;
+      // OpenAI tool-call assistant messages should not carry prose content.
+      // Drop any model preamble around the JSON tool request.
+      content = null;
+      finishReason = "tool_calls";
+    }
+  }
 
   return {
     id: `chatcmpl-${requestId}`,
@@ -87,9 +152,10 @@ export function cliResultToOpenai(
         index: 0,
         message: {
           role: "assistant",
-          content: ensureString(result.result),
+          content,
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
         },
-        finish_reason: "stop",
+        finish_reason: finishReason,
       },
     ],
     usage,

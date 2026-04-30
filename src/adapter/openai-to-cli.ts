@@ -3,6 +3,7 @@
  */
 
 import type { OpenAIChatRequest, OpenAIMessageContent } from "../types/openai.js";
+import { toolDefsToPrompt, toolResultToPrompt, assistantToolCallsToPrompt, shouldBridgeExternalTools } from "./tools.js";
 
 export type ClaudeModel = "opus" | "sonnet" | "haiku" | string;
 
@@ -91,30 +92,54 @@ function extractContentText(content: OpenAIMessageContent): string {
  *
  * Claude Code CLI in --print mode expects a single prompt, not a conversation.
  * We format the messages into a readable format that preserves context.
+ *
+ * When external tools are provided, injects tool definitions into the prompt
+ * and converts tool-result messages into Claude-readable context.
  */
-export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): string {
+export function messagesToPrompt(
+  messages: OpenAIChatRequest["messages"],
+  req?: Pick<OpenAIChatRequest, "tools" | "tool_choice">,
+): string {
   const parts: string[] = [];
 
-  for (const msg of messages) {
-    const text = extractContentText(msg.content);
-    if (!text) continue;
+  // Inject external caller-dispatched tool definitions as a system block.
+  if (req && shouldBridgeExternalTools(req)) {
+    parts.push(`<system>\n${toolDefsToPrompt(req)}\n</system>\n`);
+  }
 
+  for (const msg of messages) {
     switch (msg.role) {
       case "system":
-      case "developer":
-        // System/developer messages become context instructions
+      case "developer": {
+        const text = extractContentText(msg.content);
+        if (!text) continue;
         parts.push(`<system>\n${text}\n</system>\n`);
         break;
+      }
 
-      case "user":
-        // User messages are the main prompt
+      case "user": {
+        const text = extractContentText(msg.content);
+        if (!text) continue;
         parts.push(text);
         break;
+      }
 
-      case "assistant":
-        // Previous assistant responses for context
-        parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
+      case "assistant": {
+        // If assistant previously made tool_calls, reproduce them as JSON
+        // so Claude sees what it requested.
+        const tcBlock = assistantToolCallsToPrompt(msg);
+        const text = extractContentText(msg.content);
+        const combined = [text, tcBlock].filter(Boolean).join("\n");
+        if (!combined) continue;
+        parts.push(`<previous_response>\n${combined}\n</previous_response>\n`);
         break;
+      }
+
+      case "tool": {
+        // Tool result from the external caller
+        parts.push(toolResultToPrompt(msg));
+        break;
+      }
     }
   }
 
@@ -126,7 +151,7 @@ export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): strin
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
   return {
-    prompt: messagesToPrompt(request.messages),
+    prompt: messagesToPrompt(request.messages, request),
     model: extractModel(request.model),
     sessionId: request.user, // Use OpenAI's user field for session mapping
   };

@@ -14,9 +14,32 @@ export interface OpenAIContentPart {
 
 export type OpenAIMessageContent = string | OpenAIContentPart[] | null;
 
+export interface OpenAIFunctionDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface OpenAITool {
+  type: "function";
+  function: OpenAIFunctionDef;
+}
+
+export interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string; // JSON-encoded
+  };
+}
+
 export interface OpenAIChatMessage {
-  role: "system" | "user" | "assistant" | "developer";
+  role: "system" | "user" | "assistant" | "developer" | "tool";
   content: OpenAIMessageContent;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string; // present when role === "tool"
+  name?: string; // tool name for role === "tool"
 }
 
 export interface OpenAIChatRequest {
@@ -29,6 +52,8 @@ export interface OpenAIChatRequest {
   frequency_penalty?: number;
   presence_penalty?: number;
   user?: string; // Used for session mapping
+  tools?: OpenAITool[];
+  tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
   stream_options?: {
     include_usage?: boolean;
   };
@@ -38,9 +63,10 @@ export interface OpenAIChatResponseChoice {
   index: number;
   message: {
     role: "assistant";
-    content: string;
+    content: string | null;
+    tool_calls?: OpenAIToolCall[];
   };
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 export interface OpenAIUsage {
@@ -66,15 +92,28 @@ export interface OpenAIChatResponse {
   usage: OpenAIUsage;
 }
 
+export interface OpenAIToolCallChunkFunction {
+  name?: string;
+  arguments?: string;
+}
+
+export interface OpenAIToolCallChunk {
+  index: number;
+  id?: string;
+  type?: "function";
+  function?: OpenAIToolCallChunkFunction;
+}
+
 export interface OpenAIChatChunkDelta {
   role?: "assistant";
-  content?: string;
+  content?: string | null;
+  tool_calls?: OpenAIToolCallChunk[];
 }
 
 export interface OpenAIChatChunkChoice {
   index: number;
   delta: OpenAIChatChunkDelta;
-  finish_reason: "stop" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
 }
 
 export interface OpenAIChatChunk {
