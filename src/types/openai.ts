@@ -29,6 +29,9 @@ export interface OpenAIChatRequest {
   frequency_penalty?: number;
   presence_penalty?: number;
   user?: string; // Used for session mapping
+  stream_options?: {
+    include_usage?: boolean;
+  };
 }
 
 export interface OpenAIChatResponseChoice {
@@ -48,6 +51,10 @@ export interface OpenAIUsage {
     cached_tokens?: number;
   };
   cache_creation_input_tokens?: number;
+  estimated?: boolean;
+  estimate_method?: string;
+  cost?: UsageCostEstimate;
+  cost_usd?: number;
 }
 
 export interface OpenAIChatResponse {
@@ -76,6 +83,26 @@ export interface OpenAIChatChunk {
   created: number;
   model: string;
   choices: OpenAIChatChunkChoice[];
+  usage?: OpenAIUsage | null;
+}
+
+export interface UsageCostEstimate {
+  currency: "USD";
+  total_cost_usd: number;
+  input_cost_usd: number;
+  cache_creation_input_cost_usd: number;
+  cached_input_cost_usd: number;
+  output_cost_usd: number;
+  model: string;
+  pricing: {
+    input_per_1m: number;
+    cache_creation_input_per_1m: number;
+    cached_input_per_1m: number;
+    output_per_1m: number;
+    source: string;
+    updated_at: string;
+    note?: string;
+  };
 }
 
 export interface OpenAIModel {

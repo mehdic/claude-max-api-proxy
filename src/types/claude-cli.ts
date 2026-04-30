@@ -1,3 +1,5 @@
+import type { UsageCostEstimate } from "../server/pricing.js";
+
 /**
  * Types for Claude Code CLI JSON streaming output
  * Based on research from PROTOCOL.md
@@ -82,6 +84,9 @@ export interface ClaudeCliResult {
     outputTokens: number;
     costUSD: number;
   }>;
+  usageEstimated?: boolean;
+  usageEstimateMethod?: "claude_cli_usage";
+  cost?: UsageCostEstimate;
 }
 
 export interface ClaudeCliSystemMessage {

@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/server/standalone.js",
+    "update-pricing": "node scripts/update-pricing.mjs",
     "test": "node --test dist/**/*.test.js",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build"
