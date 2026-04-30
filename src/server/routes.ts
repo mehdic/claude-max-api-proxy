@@ -14,6 +14,7 @@ import {
   cliResultToOpenai,
   createDoneChunk,
   extractTextContent,
+  resultUsageToOpenAI,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
@@ -21,7 +22,9 @@ import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
 import { resolveRuntime, defaultRuntime } from "../subprocess/runtime.js";
 import { poolStats } from "../subprocess/session-pool.js";
-import { recordRequest, recordSpawnFailure } from "./metrics.js";
+import { recordRequest, recordSpawnFailure, recordTokenUsage } from "./metrics.js";
+import { pricingSnapshot } from "./pricing.js";
+import { annotateClaudeUsage, modelFromResult, usageFromClaudeResult } from "./usage.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -166,7 +169,7 @@ export async function handleChatCompletions(
     }
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
+      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, body.stream_options?.include_usage === true);
     } else {
       await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
     }
@@ -198,7 +201,8 @@ async function handleStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
   cliInput: ReturnType<typeof openaiToCli>,
-  requestId: string
+  requestId: string,
+  includeUsage: boolean,
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -255,11 +259,12 @@ async function handleStreamingResponse(
       lastModel = message.message.model;
     });
 
-    subprocess.on("result", (_result: ClaudeCliResult) => {
+    subprocess.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
       if (!res.writableEnded) {
+        annotateAndRecordUsage(result, cliInput.model);
         // Send final done chunk with finish_reason
-        const doneChunk = createDoneChunk(requestId, lastModel);
+        const doneChunk = createDoneChunk(requestId, lastModel, includeUsage ? resultUsageToOpenAI(result) : undefined);
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
@@ -335,6 +340,8 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
+        annotateAndRecordUsage(finalResult, cliInput.model);
+        setUsageHeaders(res, finalResult);
         res.json(cliResultToOpenai(finalResult, requestId));
       } else if (!res.headersSent) {
         res.status(500).json({
@@ -542,12 +549,15 @@ async function handleStreamJsonRequest(
   try {
     const result = await subprocess.submitTurn(userText);
     done = true;
+    annotateAndRecordUsage(result, model);
 
     if (stream && !res.writableEnded) {
-      res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel))}\n\n`);
+      const usage = body.stream_options?.include_usage === true ? resultUsageToOpenAI(result) : undefined;
+      res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage))}\n\n`);
       res.write("data: [DONE]\n\n");
       res.end();
     } else if (!stream && !res.headersSent) {
+      setUsageHeaders(res, result);
       res.json(cliResultToOpenai(result, requestId));
     }
 
@@ -571,6 +581,21 @@ async function handleStreamJsonRequest(
     subprocess.off("assistant", onAssistant);
     subprocess.off("message", onAnyClaudeEvent);
   }
+}
+
+function annotateAndRecordUsage(result: ClaudeCliResult, requestedModel: string): void {
+  annotateClaudeUsage(result, requestedModel);
+  recordTokenUsage(modelFromResult(result, requestedModel), usageFromClaudeResult(result), result.cost, Boolean(result.usageEstimated));
+}
+
+function setUsageHeaders(res: Response, result: ClaudeCliResult): void {
+  if (!result.usage || res.headersSent) return;
+  const usage = usageFromClaudeResult(result);
+  res.setHeader("X-Claude-Proxy-Prompt-Tokens", String(usage.inputTokens + usage.cacheCreationInputTokens + usage.cachedInputTokens));
+  res.setHeader("X-Claude-Proxy-Completion-Tokens", String(usage.outputTokens));
+  res.setHeader("X-Claude-Proxy-Total-Tokens", String(usage.totalTokens));
+  res.setHeader("X-Claude-Proxy-Usage-Estimated", result.usageEstimated ? "true" : "false");
+  if (result.cost) res.setHeader("X-Claude-Proxy-Estimated-Cost-Usd", result.cost.total_cost_usd.toFixed(6));
 }
 
 /**
@@ -598,6 +623,15 @@ export function handleModels(_req: Request, res: Response): void {
       created,
     })),
   });
+}
+
+/**
+ * Handle GET /pricing and /v1/pricing
+ *
+ * Exposes the local public pricing book used for API-equivalent cost estimates.
+ */
+export function handlePricing(_req: Request, res: Response): void {
+  res.json({ object: "pricing_book", ...pricingSnapshot() });
 }
 
 /**

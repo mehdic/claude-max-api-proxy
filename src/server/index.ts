@@ -6,7 +6,7 @@
 
 import express, { Express, Request, Response, NextFunction } from "express";
 import { createServer, Server } from "http";
-import { handleChatCompletions, handleModels, handleHealth, handleHealthDeep } from "./routes.js";
+import { handleChatCompletions, handleModels, handleHealth, handleHealthDeep, handlePricing } from "./routes.js";
 import { handleMetrics } from "./metrics.js";
 
 export interface ServerConfig {
@@ -51,6 +51,8 @@ function createApp(): Express {
   app.get("/health", handleHealth);
   app.get("/healthz/deep", handleHealthDeep);
   app.get("/metrics", handleMetrics);
+  app.get("/pricing", handlePricing);
+  app.get("/v1/pricing", handlePricing);
   app.get("/v1/models", handleModels);
   app.get("/models", handleModels);
   app.post("/v1/chat/completions", handleChatCompletions);

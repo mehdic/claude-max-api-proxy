@@ -18,6 +18,7 @@ import type { Request, Response } from "express";
 import { poolCounters, poolStats } from "../subprocess/session-pool.js";
 import { fallbackCounters } from "./routes.js";
 import { defaultRuntime } from "../subprocess/runtime.js";
+import type { ClaudeTokenUsageBreakdown, UsageCostEstimate } from "./pricing.js";
 
 // Per-request counters maintained inline by the chat-completion handlers.
 // Recorded with a fixed label set: runtime + canonical model + status.
@@ -38,6 +39,8 @@ interface RequestBucket {
 const HIST_BUCKETS_MS = [100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
 const requestRecords: Map<string, RequestBucket> = new Map();
 const subprocessSpawnFailures: Record<string, number> = {};
+const tokenCounters: Record<string, number> = {};
+const costCounters: Record<string, number> = {};
 
 /** Call from chat handlers when a request finishes. */
 export function recordRequest(rec: RequestRecord): void {
@@ -58,11 +61,55 @@ export function recordSpawnFailure(runtime: "stream-json" | "print"): void {
   subprocessSpawnFailures[runtime] = (subprocessSpawnFailures[runtime] || 0) + 1;
 }
 
+export function recordTokenUsage(
+  model: string,
+  usage: ClaudeTokenUsageBreakdown,
+  cost: UsageCostEstimate | undefined,
+  estimated: boolean,
+): void {
+  const labels = { model: canonicalizeMetricModel(model), estimated: estimated ? "true" : "false" };
+  addLabeled(tokenCounters, "claude_proxy_tokens_total", usage.inputTokens || 0, { ...labels, direction: "input" });
+  addLabeled(tokenCounters, "claude_proxy_tokens_total", usage.cacheCreationInputTokens || 0, { ...labels, direction: "cache_creation_input" });
+  addLabeled(tokenCounters, "claude_proxy_tokens_total", usage.cachedInputTokens || 0, { ...labels, direction: "cached_input" });
+  addLabeled(tokenCounters, "claude_proxy_tokens_total", usage.outputTokens || 0, { ...labels, direction: "output" });
+  addLabeled(tokenCounters, "claude_proxy_tokens_total", usage.totalTokens || 0, { ...labels, direction: "total" });
+  if (cost) addLabeled(costCounters, "claude_proxy_estimated_cost_usd_total", cost.total_cost_usd, labels);
+}
+
 function escapeLabel(v: string): string {
   return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
-export function handleMetrics(_req: Request, res: Response): void {
+function canonicalizeMetricModel(model: string): string {
+  const stripped = String(model || "").replace(/^(anthropic|claude-proxy|claude-code-cli|openrouter\/anthropic)\//, "");
+  if (stripped === "opus") return "claude-opus-4-6";
+  if (stripped === "sonnet") return "claude-sonnet-4-6";
+  if (stripped === "haiku") return "claude-haiku-4-5";
+  if (stripped.startsWith("claude-opus-4-7")) return "claude-opus-4-7";
+  if (stripped.startsWith("claude-opus-4-6")) return "claude-opus-4-6";
+  if (stripped.startsWith("claude-opus-4")) return "claude-opus-4";
+  if (stripped.startsWith("claude-sonnet-4-6")) return "claude-sonnet-4-6";
+  if (stripped.startsWith("claude-sonnet-4-5")) return "claude-sonnet-4-5";
+  if (stripped.startsWith("claude-sonnet-4")) return "claude-sonnet-4";
+  if (stripped.startsWith("claude-haiku-4-5")) return "claude-haiku-4-5";
+  if (stripped.startsWith("claude-haiku-4")) return "claude-haiku-4";
+  return stripped ? "other" : "unknown";
+}
+
+function labeledKey(name: string, labels?: Record<string, string>): string {
+  if (!labels || Object.keys(labels).length === 0) return name;
+  const parts = Object.entries(labels)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}="${escapeLabel(v)}"`)
+    .join(",");
+  return `${name}{${parts}}`;
+}
+
+function addLabeled(target: Record<string, number>, name: string, value: number, labels?: Record<string, string>): void {
+  target[labeledKey(name, labels)] = (target[labeledKey(name, labels)] || 0) + Math.max(0, Number(value) || 0);
+}
+
+export function renderMetrics(): string {
   const lines: string[] = [];
 
   // claude_proxy_requests_total
@@ -73,6 +120,19 @@ export function handleMetrics(_req: Request, res: Response): void {
     lines.push(
       `claude_proxy_requests_total{runtime="${escapeLabel(runtime)}",model="${escapeLabel(model)}",status="${escapeLabel(status)}"} ${bucket.count}`,
     );
+  }
+
+  // claude_proxy_tokens_total + claude_proxy_estimated_cost_usd_total
+  lines.push("# HELP claude_proxy_tokens_total Claude token usage observed in completed responses.");
+  lines.push("# TYPE claude_proxy_tokens_total counter");
+  for (const [key, val] of Object.entries(tokenCounters)) {
+    lines.push(`${key} ${val}`);
+  }
+
+  lines.push("# HELP claude_proxy_estimated_cost_usd_total Estimated Claude API-equivalent cost in USD.");
+  lines.push("# TYPE claude_proxy_estimated_cost_usd_total counter");
+  for (const [key, val] of Object.entries(costCounters)) {
+    lines.push(`${key} ${val.toFixed(6)}`);
   }
 
   // claude_proxy_request_duration_seconds (histogram)
@@ -145,6 +205,17 @@ export function handleMetrics(_req: Request, res: Response): void {
   lines.push(`claude_proxy_runtime_default{runtime="stream-json"} ${defaultRuntime() === "stream-json" ? 1 : 0}`);
   lines.push(`claude_proxy_runtime_default{runtime="print"} ${defaultRuntime() === "print" ? 1 : 0}`);
 
+  return lines.join("\n") + "\n";
+}
+
+export function resetMetrics(): void {
+  requestRecords.clear();
+  for (const key of Object.keys(subprocessSpawnFailures)) delete subprocessSpawnFailures[key];
+  for (const key of Object.keys(tokenCounters)) delete tokenCounters[key];
+  for (const key of Object.keys(costCounters)) delete costCounters[key];
+}
+
+export function handleMetrics(_req: Request, res: Response): void {
   res.setHeader("Content-Type", "text/plain; version=0.0.4");
-  res.send(lines.join("\n") + "\n");
+  res.send(renderMetrics());
 }

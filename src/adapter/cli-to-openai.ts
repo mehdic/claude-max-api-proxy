@@ -3,7 +3,7 @@
  */
 
 import type { ClaudeCliAssistant, ClaudeCliResult } from "../types/claude-cli.js";
-import type { OpenAIChatResponse, OpenAIChatChunk } from "../types/openai.js";
+import type { OpenAIChatResponse, OpenAIChatChunk, OpenAIUsage } from "../types/openai.js";
 
 /**
  * Extract text content from Claude CLI assistant message
@@ -46,7 +46,7 @@ export function cliToOpenaiChunk(
 /**
  * Create a final "done" chunk for streaming
  */
-export function createDoneChunk(requestId: string, model: string): OpenAIChatChunk {
+export function createDoneChunk(requestId: string, model: string, usage?: OpenAIUsage | null): OpenAIChatChunk {
   return {
     id: `chatcmpl-${requestId}`,
     object: "chat.completion.chunk",
@@ -59,6 +59,7 @@ export function createDoneChunk(requestId: string, model: string): OpenAIChatChu
         finish_reason: "stop",
       },
     ],
+    ...(usage !== undefined ? { usage } : {}),
   };
 }
 
@@ -74,10 +75,7 @@ export function cliResultToOpenai(
     ? Object.keys(result.modelUsage)[0]
     : "claude-sonnet-4";
 
-  const inputTokens = result.usage?.input_tokens || 0;
-  const outputTokens = result.usage?.output_tokens || 0;
-  const cacheReadTokens = result.usage?.cache_read_input_tokens || 0;
-  const cacheCreationTokens = result.usage?.cache_creation_input_tokens || 0;
+  const usage = resultUsageToOpenAI(result);
 
   return {
     id: `chatcmpl-${requestId}`,
@@ -94,13 +92,25 @@ export function cliResultToOpenai(
         finish_reason: "stop",
       },
     ],
-    usage: {
-      prompt_tokens: inputTokens + cacheReadTokens + cacheCreationTokens,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens,
-      prompt_tokens_details: { cached_tokens: cacheReadTokens },
-      cache_creation_input_tokens: cacheCreationTokens,
-    },
+    usage,
+  };
+}
+
+export function resultUsageToOpenAI(result: ClaudeCliResult): OpenAIUsage {
+  const inputTokens = result.usage?.input_tokens || 0;
+  const outputTokens = result.usage?.output_tokens || 0;
+  const cacheReadTokens = result.usage?.cache_read_input_tokens || 0;
+  const cacheCreationTokens = result.usage?.cache_creation_input_tokens || 0;
+  const totalTokens = inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens;
+  return {
+    prompt_tokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+    completion_tokens: outputTokens,
+    total_tokens: totalTokens,
+    prompt_tokens_details: { cached_tokens: cacheReadTokens },
+    cache_creation_input_tokens: cacheCreationTokens,
+    estimated: Boolean(result.usageEstimated),
+    estimate_method: result.usageEstimateMethod,
+    ...(result.cost ? { cost: result.cost, cost_usd: result.cost.total_cost_usd } : {}),
   };
 }
 
