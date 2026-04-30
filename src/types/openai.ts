@@ -163,3 +163,74 @@ export interface OpenAIError {
     code: string | null;
   };
 }
+
+// ── OpenAI Responses API types ──────────────────────────────────────
+
+export interface ResponsesInputTextPart {
+  type: "input_text";
+  text: string;
+}
+
+export interface ResponsesOutputTextPart {
+  type: "output_text";
+  text: string;
+}
+
+export type ResponsesContentPart = ResponsesInputTextPart | ResponsesOutputTextPart;
+
+export interface ResponsesMessageItem {
+  role: "user" | "assistant" | "system" | "developer";
+  content: string | ResponsesContentPart[];
+}
+
+export type ResponsesInput = string | ResponsesMessageItem[];
+
+export interface ResponsesRequest {
+  model: string;
+  input: ResponsesInput;
+  stream?: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  instructions?: string;
+  tools?: OpenAITool[];
+  tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+}
+
+export interface ResponsesOutputMessageContent {
+  type: "output_text";
+  text: string;
+  annotations?: unknown[];
+}
+
+export interface ResponsesOutputMessage {
+  type: "message";
+  id: string;
+  role: "assistant";
+  status: "completed";
+  content: ResponsesOutputMessageContent[];
+}
+
+export interface ResponsesUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+  };
+  output_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+  cost?: UsageCostEstimate;
+  cost_usd?: number;
+}
+
+export interface ResponsesResponse {
+  id: string;
+  object: "response";
+  created_at: number;
+  model: string;
+  output: ResponsesOutputMessage[];
+  output_text: string;
+  status: "completed" | "failed" | "incomplete";
+  usage: ResponsesUsage;
+}

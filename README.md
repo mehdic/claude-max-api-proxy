@@ -2,7 +2,7 @@
 
 **Use your Claude Pro / Max subscription with any OpenAI-compatible client.** No API keys, no per-token billing, no separate Anthropic account.
 
-This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` format — [openclaw](https://github.com/openclaw/openclaw), Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
+This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` or minimal `responses` format — [openclaw](https://github.com/openclaw/openclaw), Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
 
 > **Tested with openclaw `2026.4.24`** as a drop-in `openai-completions` provider. Multi-turn cache hits, streaming, and the SSE keepalive have all been verified against live openclaw traffic on this version. See [openclaw integration](#openclaw) below for the exact provider config.
 
@@ -20,7 +20,7 @@ Anthropic blocks OAuth tokens from being used directly with third-party API clie
 
 ```
 Your tool (Continue.dev, Aider, your agent, …)
-       │  HTTP, OpenAI chat/completions format
+       │  HTTP, OpenAI chat/completions or responses format
        ▼
 claude-proxy   (this project, listens on :3456)
        │  spawns subprocess
@@ -74,7 +74,7 @@ curl -s -X POST http://127.0.0.1:3456/chat/completions \
   -d '{"model":"claude-opus-4-7","messages":[{"role":"user","content":"Reply OK only."}]}'
 ```
 
-> Routes are mounted at both `/chat/completions` and `/v1/chat/completions` for compatibility with clients that prepend `/v1` themselves and ones that don't.
+> Chat routes are mounted at both `/chat/completions` and `/v1/chat/completions`; Responses routes are mounted at both `/responses` and `/v1/responses` for compatibility with clients that prepend `/v1` themselves and ones that don't.
 
 ## Available models
 
@@ -162,6 +162,7 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `/metrics` | GET | Prometheus exposition. See "Metrics" below. |
 | `/models`, `/v1/models` | GET | List served model ids |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
+| `/responses`, `/v1/responses` | POST | Minimal OpenAI Responses API compatibility. Supports string/array `input`, `instructions`, usage/cost annotations, and basic streaming Responses SSE events |
 
 ### Metrics
 
