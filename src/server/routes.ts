@@ -18,7 +18,7 @@ import {
   resultUsageToOpenAI,
 } from "../adapter/cli-to-openai.js";
 import { parseToolCalls, shouldBridgeExternalTools } from "../adapter/tools.js";
-import type { OpenAIChatRequest } from "../types/openai.js";
+import type { OpenAIChatRequest, ResponsesRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
@@ -27,6 +27,14 @@ import { poolStats } from "../subprocess/session-pool.js";
 import { recordRequest, recordSpawnFailure, recordTokenUsage } from "./metrics.js";
 import { pricingSnapshot } from "./pricing.js";
 import { annotateClaudeUsage, modelFromResult, usageFromClaudeResult } from "./usage.js";
+import {
+  responsesToChatRequest,
+  chatResponseToResponses,
+  chatUsageToResponsesUsage,
+  buildResponsesStreamEvents,
+  buildTextDeltaEvent,
+  buildStreamDoneEvents,
+} from "../adapter/responses.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -650,6 +658,215 @@ function setUsageHeaders(res: Response, result: ClaudeCliResult): void {
   res.setHeader("X-Claude-Proxy-Total-Tokens", String(usage.totalTokens));
   res.setHeader("X-Claude-Proxy-Usage-Estimated", result.usageEstimated ? "true" : "false");
   if (result.cost) res.setHeader("X-Claude-Proxy-Estimated-Cost-Usd", result.cost.total_cost_usd.toFixed(6));
+}
+
+/**
+ * Handle POST /v1/responses
+ *
+ * OpenAI Responses API compatibility. Translates to a Chat Completions request
+ * internally, reusing the existing Claude CLI transport, then reshapes the
+ * result into the Responses API envelope.
+ */
+export async function handleResponses(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
+  const body = req.body as ResponsesRequest;
+  const stream = body.stream === true;
+  const reqStart = Date.now();
+
+  // Responses compatibility currently reuses the stable --print transport path.
+  res.on("close", () => {
+    const status: "ok" | "error" = res.statusCode >= 400 ? "error" : "ok";
+    recordRequest({ runtime: "print", model: canonicalizeModelLabel(body.model), status, durationMs: Date.now() - reqStart });
+  });
+
+  try {
+    // Validate: input is required
+    if (body.input === undefined || body.input === null) {
+      res.status(400).json({
+        error: {
+          message: "input is required",
+          type: "invalid_request_error",
+          code: "invalid_input",
+        },
+      });
+      return;
+    }
+
+    // Translate Responses request → Chat Completions request
+    const chatReq = responsesToChatRequest(body);
+
+    if (stream) {
+      await handleResponsesStreaming(req, res, chatReq, requestId, body.model);
+    } else {
+      await handleResponsesNonStreaming(res, chatReq, requestId);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[handleResponses] Error:", message);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: { message, type: "server_error", code: null },
+      });
+    }
+  }
+}
+
+/**
+ * Non-streaming Responses API handler.
+ * Internally delegates to the --print path and converts the result.
+ */
+async function handleResponsesNonStreaming(
+  res: Response,
+  chatReq: OpenAIChatRequest,
+  requestId: string,
+): Promise<void> {
+  const cliInput = openaiToCli(chatReq);
+  const subprocess = await acquireSubprocess(cliInput.model);
+
+  return new Promise((resolve) => {
+    let finalResult: ClaudeCliResult | null = null;
+
+    subprocess.on("result", (result: ClaudeCliResult) => {
+      finalResult = result;
+    });
+
+    subprocess.on("error", (error: Error) => {
+      console.error("[Responses NonStreaming] Error:", error.message);
+      res.status(500).json({
+        error: { message: error.message, type: "server_error", code: null },
+      });
+      resolve();
+    });
+
+    subprocess.on("close", (code: number | null) => {
+      if (finalResult) {
+        annotateAndRecordUsage(finalResult, cliInput.model);
+        const chatResponse = cliResultToOpenai(finalResult, requestId, chatReq);
+        const responsesResponse = chatResponseToResponses(chatResponse, requestId);
+        res.json(responsesResponse);
+      } else if (!res.headersSent) {
+        res.status(500).json({
+          error: {
+            message: `Claude CLI exited with code ${code} without response`,
+            type: "server_error",
+            code: null,
+          },
+        });
+      }
+      resolve();
+    });
+
+    try {
+      subprocess.submit(cliInput.prompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({
+        error: { message, type: "server_error", code: null },
+      });
+      resolve();
+    }
+  });
+}
+
+/**
+ * Streaming Responses API handler.
+ * Emits Responses API SSE events (response.created, response.output_text.delta, etc.)
+ */
+async function handleResponsesStreaming(
+  req: Request,
+  res: Response,
+  chatReq: OpenAIChatRequest,
+  requestId: string,
+  requestModel: string,
+): Promise<void> {
+  const cliInput = openaiToCli(chatReq);
+  const subprocess = await acquireSubprocess(cliInput.model);
+  const responseId = `resp_${requestId}`;
+  const msgId = `msg_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Request-Id", requestId);
+  res.flushHeaders();
+
+  // Emit opening envelope events
+  const envelope = buildResponsesStreamEvents(responseId, msgId, requestModel);
+  res.write(`event: response.created\ndata: ${envelope.created}\n\n`);
+  res.write(`event: response.output_item.added\ndata: ${envelope.itemAdded}\n\n`);
+  res.write(`event: response.content_part.added\ndata: ${envelope.partAdded}\n\n`);
+
+  return new Promise<void>((resolve) => {
+    let isComplete = false;
+    let fullText = "";
+    let lastModel = requestModel;
+
+    res.on("close", () => {
+      if (!isComplete) subprocess.kill();
+      resolve();
+    });
+
+    subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
+      const text = event.event.delta?.text || "";
+      if (text && !res.writableEnded) {
+        fullText += text;
+        res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+      }
+    });
+
+    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+      lastModel = message.message.model;
+    });
+
+    subprocess.on("result", (result: ClaudeCliResult) => {
+      isComplete = true;
+      if (!res.writableEnded) {
+        annotateAndRecordUsage(result, cliInput.model);
+        if (!fullText) fullText = result.result || "";
+        const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
+        const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, fullText, usage);
+        for (const evt of doneEvents) {
+          const parsed = JSON.parse(evt);
+          res.write(`event: ${parsed.type}\ndata: ${evt}\n\n`);
+        }
+        res.end();
+      }
+      resolve();
+    });
+
+    subprocess.on("error", (error: Error) => {
+      console.error("[Responses Streaming] Error:", error.message);
+      if (!res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: { message: error.message, type: "server_error" } })}\n\n`);
+        res.end();
+      }
+      resolve();
+    });
+
+    subprocess.on("close", (code: number | null) => {
+      if (!res.writableEnded) {
+        if (code !== 0 && !isComplete) {
+          res.write(`event: error\ndata: ${JSON.stringify({ error: { message: `Process exited with code ${code}`, type: "server_error" } })}\n\n`);
+        }
+        res.end();
+      }
+      resolve();
+    });
+
+    try {
+      subprocess.submit(cliInput.prompt);
+    } catch (err) {
+      console.error("[Responses Streaming] Submit error:", err);
+      if (!res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: { message: (err as Error).message, type: "server_error" } })}\n\n`);
+        res.end();
+      }
+      resolve();
+    }
+  });
 }
 
 /**
