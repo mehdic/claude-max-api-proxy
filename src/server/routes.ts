@@ -13,9 +13,11 @@ import { extractModel, openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
+  createToolCallChunks,
   extractTextContent,
   resultUsageToOpenAI,
 } from "../adapter/cli-to-openai.js";
+import { parseToolCalls, shouldBridgeExternalTools } from "../adapter/tools.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
@@ -169,9 +171,9 @@ export async function handleChatCompletions(
     }
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, body.stream_options?.include_usage === true);
+      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, body.stream_options?.include_usage === true, body);
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
+      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, body);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -203,6 +205,7 @@ async function handleStreamingResponse(
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
   includeUsage: boolean,
+  body: OpenAIChatRequest,
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -221,6 +224,8 @@ async function handleStreamingResponse(
     let isFirst = true;
     let lastModel = "claude-sonnet-4";
     let isComplete = false;
+    let bufferedText = "";
+    const bridgeTools = shouldBridgeExternalTools(body);
 
     // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
@@ -234,6 +239,10 @@ async function handleStreamingResponse(
     // Handle streaming content deltas
     subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
       const text = event.event.delta?.text || "";
+      if (text && bridgeTools) {
+        bufferedText += text;
+        return;
+      }
       if (text && !res.writableEnded) {
         const chunk = {
           id: `chatcmpl-${requestId}`,
@@ -263,9 +272,27 @@ async function handleStreamingResponse(
       isComplete = true;
       if (!res.writableEnded) {
         annotateAndRecordUsage(result, cliInput.model);
-        // Send final done chunk with finish_reason
-        const doneChunk = createDoneChunk(requestId, lastModel, includeUsage ? resultUsageToOpenAI(result) : undefined);
-        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+        const rawText = result.result || bufferedText;
+        const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+        if (parsed.toolCalls.length > 0) {
+          for (const chunk of createToolCallChunks(requestId, lastModel, parsed.toolCalls)) {
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
+          res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, includeUsage ? resultUsageToOpenAI(result) : undefined, "tool_calls"))}\n\n`);
+        } else {
+          if (bridgeTools && parsed.textContent && !res.writableEnded) {
+            const contentChunk = {
+              id: `chatcmpl-${requestId}`,
+              object: "chat.completion.chunk" as const,
+              created: Math.floor(Date.now() / 1000),
+              model: lastModel,
+              choices: [{ index: 0, delta: { role: isFirst ? "assistant" as const : undefined, content: parsed.textContent }, finish_reason: null }],
+            };
+            res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+            isFirst = false;
+          }
+          res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, includeUsage ? resultUsageToOpenAI(result) : undefined))}\n\n`);
+        }
         res.write("data: [DONE]\n\n");
         res.end();
       }
@@ -317,7 +344,8 @@ async function handleNonStreamingResponse(
   res: Response,
   subprocess: ClaudeSubprocess,
   cliInput: ReturnType<typeof openaiToCli>,
-  requestId: string
+  requestId: string,
+  body: OpenAIChatRequest,
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
@@ -342,7 +370,7 @@ async function handleNonStreamingResponse(
       if (finalResult) {
         annotateAndRecordUsage(finalResult, cliInput.model);
         setUsageHeaders(res, finalResult);
-        res.json(cliResultToOpenai(finalResult, requestId));
+        res.json(cliResultToOpenai(finalResult, requestId, body));
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {
@@ -400,6 +428,7 @@ async function handleStreamJsonRequest(
   let isFirst = true;
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
+  const bridgeTools = shouldBridgeExternalTools(body);
   let done = false;
   let lastActivityAt = Date.now();
 
@@ -445,8 +474,8 @@ async function handleStreamJsonRequest(
 
   const writeKeepaliveChunk = async () => {
     if (res.writableEnded) return;
-    let content: string = ZWSP;
-    if (n8nProgressEnabled() && n8nDetector.isInFlight()) {
+    let content: string | undefined = bridgeTools ? undefined : ZWSP;
+    if (!bridgeTools && n8nProgressEnabled() && n8nDetector.isInFlight()) {
       const snap = await getRunningExecution();
       if (snap) {
         const line = formatProgress(snap);
@@ -458,6 +487,9 @@ async function handleStreamJsonRequest(
         }
       }
     }
+    const delta = bridgeTools
+      ? (isFirst ? { role: "assistant" as const } : {})
+      : (isFirst ? { role: "assistant" as const, content } : { content });
     const chunk = {
       id: `chatcmpl-${requestId}`,
       object: "chat.completion.chunk",
@@ -465,7 +497,7 @@ async function handleStreamJsonRequest(
       model: lastModel,
       choices: [{
         index: 0,
-        delta: isFirst ? { role: "assistant", content } : { content },
+        delta,
         finish_reason: null,
       }],
     };
@@ -513,6 +545,7 @@ async function handleStreamJsonRequest(
     if (!text) return;
     assistantText += text;
     lastActivityAt = Date.now();
+    if (bridgeTools) return;
     if (stream && !res.writableEnded) {
       const chunk = {
         id: `chatcmpl-${requestId}`,
@@ -551,14 +584,35 @@ async function handleStreamJsonRequest(
     done = true;
     annotateAndRecordUsage(result, model);
 
+    const rawText = result.result || assistantText;
+    const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+
     if (stream && !res.writableEnded) {
       const usage = body.stream_options?.include_usage === true ? resultUsageToOpenAI(result) : undefined;
-      res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage))}\n\n`);
+      if (parsed.toolCalls.length > 0) {
+        for (const chunk of createToolCallChunks(requestId, lastModel, parsed.toolCalls)) {
+          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        }
+        res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage, "tool_calls"))}\n\n`);
+      } else {
+        if (bridgeTools && parsed.textContent) {
+          const contentChunk = {
+            id: `chatcmpl-${requestId}`,
+            object: "chat.completion.chunk" as const,
+            created: Math.floor(Date.now() / 1000),
+            model: lastModel,
+            choices: [{ index: 0, delta: { role: isFirst ? "assistant" as const : undefined, content: parsed.textContent }, finish_reason: null }],
+          };
+          res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
+          isFirst = false;
+        }
+        res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage))}\n\n`);
+      }
       res.write("data: [DONE]\n\n");
       res.end();
     } else if (!stream && !res.headersSent) {
       setUsageHeaders(res, result);
-      res.json(cliResultToOpenai(result, requestId));
+      res.json(cliResultToOpenai(result, requestId, body));
     }
 
     // Re-pool the subprocess for the next turn in this conversation.

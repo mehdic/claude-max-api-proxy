@@ -413,41 +413,41 @@ Save as `~/Library/LaunchAgents/local.claude-proxy.plist`, edit `<HOME>` and the
 </plist>
 ```
 
-## Tools translation modes (optional)
+## External OpenAI/OpenClaw tools bridge
 
-When the calling client (e.g. openclaw) registers MCP servers and includes their tool schemas in the OpenAI request, the proxy by default **strips the `tools[]` field** before invoking the inner `claude` CLI — the inner claude doesn't know those tools exist. This is the safe default; the trade-off is that agents (Sevro et al.) can't actually call the openclaw-registered MCPs from inside the claude subprocess.
+When an OpenAI-compatible caller (for example openclaw) includes `tools[]` in a Chat Completions request, claude-proxy now supports a composable caller-dispatched bridge:
 
-**Set `CLAUDE_PROXY_TOOLS_TRANSLATION=1`** to change that. The proxy then injects a `--mcp-config` JSON when spawning the inner claude, registering the same MCP servers the proxy knows about. The inner claude exposes those tools natively (as `mcp__<server>__<tool>`) and the model can invoke them.
+- The external OpenAI/OpenClaw tools are described to Claude **in addition to Claude Code native capabilities/tools**.
+- Claude can request an external caller-dispatched tool by returning a JSON object shaped as `{"tool_call":{"name":"tool_name","arguments":{}}}`.
+- The proxy parses that request and returns OpenAI-compatible `message.tool_calls` / streaming `delta.tool_calls` with `finish_reason: "tool_calls"`.
+- The proxy does **not** execute those external tools. The caller dispatches them, preserving openclaw's audit, approval, and allowlist path.
+- Follow-up OpenAI `role: "tool"` messages are preserved in the prompt as `<tool_result ...>` blocks so Claude consumes the result rather than repeating the same external call.
 
-### Sources of MCP-server registrations
+This bridge does not replace or disable Claude Code's native tools/capabilities. Native Claude Code capabilities remain available in the CLI context; the bridge only adds a way to ask the caller to run external OpenAI/OpenClaw tools.
 
-The proxy collects servers from two places, in priority order:
+### Tool modes and trade-offs
 
-1. **`openclaw.json`'s `mcp.servers` section** (the generic path). Path defaults to `~/.openclaw/openclaw.json`, overridable via `CLAUDE_PROXY_OPENCLAW_CONFIG`. **Adding an MCP server in openclaw automatically makes it visible to the inner claude — no proxy code change.** Secret references like `{ "source": "exec", "provider": "keychain", "id": "n8n/apiKey" }` are resolved by invoking openclaw's own keychain resolver (path comes from `secrets.providers.keychain.command` in the same JSON).
-2. **Direct env vars (legacy, n8n only):** `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` register `n8n` if `openclaw.json` didn't already. Convenient because the proxy already uses these vars for the n8n-aware keepalive.
+There are now two distinct tool paths:
 
-The combined map is loaded once per proxy process, cached for its lifetime. Config changes require a proxy restart (matches openclaw's own hot-reload model — `mcp.servers` changes there also force a gateway restart).
+1. **Caller-dispatched OpenAI/OpenClaw bridge (default for operational `tools[]`)** — safe for openclaw: the proxy emits `tool_calls`; openclaw executes tools externally.
+2. **Inner Claude MCP injection (`CLAUDE_PROXY_TOOLS_TRANSLATION=1`)** — optional legacy/advanced mode that registers known MCP servers with the inner claude CLI via `--mcp-config`. Claude executes those tools locally inside the subprocess, so openclaw's dispatcher/audit/approval path does not see those calls.
 
-Useful env vars for this feature:
+Use the caller-dispatched bridge when you want openclaw to remain authoritative. Use MCP injection only when you deliberately accept the local-execution audit trade-off.
+
+### MCP injection sources (optional advanced mode)
+
+When `CLAUDE_PROXY_TOOLS_TRANSLATION=1` is enabled, the proxy collects MCP servers from two places, in priority order:
+
+1. **`openclaw.json`'s `mcp.servers` section** (path defaults to `~/.openclaw/openclaw.json`, overridable via `CLAUDE_PROXY_OPENCLAW_CONFIG`). Secret references can be resolved through openclaw's keychain resolver.
+2. **Direct env vars (legacy, n8n only):** `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` register `n8n` if `openclaw.json` did not already.
+
+Useful env vars for MCP injection:
 
 | Variable | Purpose |
 |---|---|
-| `CLAUDE_PROXY_TOOLS_TRANSLATION=1` | Enable. Off by default. |
+| `CLAUDE_PROXY_TOOLS_TRANSLATION=1` | Enable inner Claude MCP injection. Off by default. |
 | `CLAUDE_PROXY_OPENCLAW_CONFIG` | Path to the JSON file with `mcp.servers`. Defaults to `~/.openclaw/openclaw.json`. |
 | `CLAUDE_PROXY_N8N_MCP_BIN` | Override `n8n-mcp` binary path. |
-
-### Trade-offs
-
-- ✅ The inner claude understands tool calling natively → high quality.
-- ✅ Sevro and friends can list, trigger, and poll n8n workflows directly.
-- ❌ The CLI executes the tool **locally**, inside the claude subprocess. **The calling client's audit / approval / per-agent allowlist do NOT see these calls** — they're invisible to openclaw's tool dispatcher.
-- ❌ Every spawned claude subprocess loads the MCP server fresh (~5 s extra per cold spawn for a heavyweight MCP). Stream-json mode amortizes this across the session.
-
-### Why not full translation back to OpenAI `tool_calls`?
-
-A previous plan (`docs/PLAN-tools-translation.md`) explored real translation: intercept claude's `tool_use` events in stream-json output, surface them to the client as OpenAI `tool_calls`, await `role: tool` follow-up, translate back to MCP. A 3-agent review on PR #2 confirmed that **claude `--input-format stream-json` does NOT emit `tool_use` events before executing the tool locally** — the CLI auto-executes and only surfaces tool_use+tool_result together as part of the final assistant message. There's no `--no-execute-tools` flag and no permission-callback hook.
-
-Without forking the CLI, full translation isn't buildable. Option A (this section) is the practical answer; the audit gap is a documented trade-off, not a bug.
 
 ## n8n-aware keepalive (optional)
 
@@ -533,7 +533,7 @@ src/
 
 - **`claude --print` has a hardcoded 3s stdin timeout.** If a client connects but takes longer than 3s to send the prompt, `claude` exits with `Error: Input must be provided either through stdin or as a prompt argument when using --print`. This is why `--print` mode can't keep warm subprocesses around.
 - **Stream-json's protocol is reverse-engineered.** Pin a `claude` CLI version you trust if you depend on this in production.
-- **No tool-use translation.** OpenAI tool-calling format is not converted to/from Claude tool calls. The proxy passes through text; tools are claude's built-in tools (Bash, Edit, Read, etc.) running in the subprocess's cwd.
+- **Tool bridge is text-protocol based.** Operational OpenAI/OpenClaw `tools[]` are exposed as caller-dispatched external tools and converted to OpenAI `tool_calls`; the proxy still does not intercept native Claude CLI `tool_use` before local execution.
 - **Single host.** This is a local proxy. Don't expose `:3456` to the network — it has no auth (the only "auth" is Claude CLI's local keychain).
 
 ## Security
