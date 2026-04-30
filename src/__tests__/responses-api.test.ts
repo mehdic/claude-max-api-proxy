@@ -4,13 +4,16 @@ import {
   responsesToChatRequest,
   chatResponseToResponses,
   chatUsageToResponsesUsage,
+  toolCallsToFunctionCallOutputs,
   buildResponsesStreamEvents,
   buildTextDeltaEvent,
   buildStreamDoneEvents,
+  buildFunctionCallStreamEvents,
 } from "../adapter/responses.js";
 import type {
   OpenAIChatResponse,
   OpenAIUsage,
+  OpenAIToolCall,
   ResponsesRequest,
 } from "../types/openai.js";
 
@@ -142,11 +145,12 @@ test("chatResponseToResponses: produces valid response envelope", () => {
   assert.equal(resp.status, "completed");
   assert.equal(resp.output_text, "Hello world");
   assert.equal(resp.output.length, 1);
-  assert.equal(resp.output[0].type, "message");
-  assert.equal(resp.output[0].role, "assistant");
-  assert.equal(resp.output[0].status, "completed");
-  assert.equal(resp.output[0].content[0].type, "output_text");
-  assert.equal(resp.output[0].content[0].text, "Hello world");
+  const msg = resp.output[0] as { type: string; role: string; status: string; content: Array<{ type: string; text: string }> };
+  assert.equal(msg.type, "message");
+  assert.equal(msg.role, "assistant");
+  assert.equal(msg.status, "completed");
+  assert.equal(msg.content[0].type, "output_text");
+  assert.equal(msg.content[0].text, "Hello world");
 });
 
 test("chatResponseToResponses: maps usage correctly", () => {
@@ -167,7 +171,8 @@ test("chatResponseToResponses: empty content handled", () => {
   chat.choices[0].message.content = null;
   const resp = chatResponseToResponses(chat, "req789");
   assert.equal(resp.output_text, "");
-  assert.equal(resp.output[0].content[0].text, "");
+  const msg = resp.output[0] as { type: "message"; content: Array<{ text: string }> };
+  assert.equal(msg.content[0].text, "");
 });
 
 // ── Usage translation ─────────────────────────────────────────────
@@ -250,6 +255,134 @@ test("buildStreamDoneEvents: emits text.done, part.done, item.done, response.com
   assert.equal(completed.response.status, "completed");
   assert.equal(completed.response.output_text, "Full text");
   assert.equal(completed.response.usage.input_tokens, 100);
+});
+
+// ── Tool-call → function_call mapping ─────────────────────────────
+
+function chatResponseWithToolCalls(): OpenAIChatResponse {
+  return {
+    id: "chatcmpl-tc123",
+    object: "chat.completion",
+    created: 1700000000,
+    model: "claude-sonnet-4",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_abc",
+              type: "function",
+              function: { name: "search_web", arguments: '{"query":"test"}' },
+            },
+            {
+              id: "call_def",
+              type: "function",
+              function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+    usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+  };
+}
+
+test("chatResponseToResponses: tool_calls produce function_call output items", () => {
+  const resp = chatResponseToResponses(chatResponseWithToolCalls(), "tc_req");
+  // First output is the message
+  assert.equal(resp.output[0].type, "message");
+  // Next are function_call items
+  assert.equal(resp.output.length, 3);
+  assert.equal(resp.output[1].type, "function_call");
+  assert.equal(resp.output[2].type, "function_call");
+
+  const fc1 = resp.output[1] as { type: "function_call"; call_id: string; name: string; arguments: string; status: string };
+  assert.equal(fc1.call_id, "call_abc");
+  assert.equal(fc1.name, "search_web");
+  assert.equal(fc1.arguments, '{"query":"test"}');
+  assert.equal(fc1.status, "completed");
+
+  const fc2 = resp.output[2] as { type: "function_call"; call_id: string; name: string };
+  assert.equal(fc2.call_id, "call_def");
+  assert.equal(fc2.name, "get_weather");
+});
+
+test("chatResponseToResponses: no tool_calls produces only message output", () => {
+  const resp = chatResponseToResponses(chatResponse("Just text"), "notc_req");
+  assert.equal(resp.output.length, 1);
+  assert.equal(resp.output[0].type, "message");
+});
+
+test("toolCallsToFunctionCallOutputs: maps call ids and arguments", () => {
+  const tcs: OpenAIToolCall[] = [
+    { id: "call_1", type: "function", function: { name: "foo", arguments: '{"x":1}' } },
+  ];
+  const fcs = toolCallsToFunctionCallOutputs(tcs);
+  assert.equal(fcs.length, 1);
+  assert.equal(fcs[0].type, "function_call");
+  assert.equal(fcs[0].call_id, "call_1");
+  assert.equal(fcs[0].id, "fc_call_1");
+  assert.equal(fcs[0].name, "foo");
+  assert.equal(fcs[0].arguments, '{"x":1}');
+  assert.equal(fcs[0].status, "completed");
+});
+
+test("buildFunctionCallStreamEvents: emits added, arguments.done, item.done per tool call", () => {
+  const tcs: OpenAIToolCall[] = [
+    { id: "call_s1", type: "function", function: { name: "search", arguments: '{"q":"hi"}' } },
+  ];
+  const events = buildFunctionCallStreamEvents(tcs, 1);
+  // 3 events per tool call: added, arguments.done, item.done
+  assert.equal(events.length, 3);
+  const types = events.map((e) => JSON.parse(e).type);
+  assert.deepEqual(types, [
+    "response.output_item.added",
+    "response.function_call_arguments.done",
+    "response.output_item.done",
+  ]);
+
+  const added = JSON.parse(events[0]);
+  assert.equal(added.output_index, 1);
+  assert.equal(added.item.type, "function_call");
+  assert.equal(added.item.name, "search");
+
+  const argsDone = JSON.parse(events[1]);
+  assert.equal(argsDone.call_id, "call_s1");
+  assert.equal(argsDone.arguments, '{"q":"hi"}');
+});
+
+test("buildFunctionCallStreamEvents: multiple tool calls get incrementing output_index", () => {
+  const tcs: OpenAIToolCall[] = [
+    { id: "call_a", type: "function", function: { name: "a", arguments: "{}" } },
+    { id: "call_b", type: "function", function: { name: "b", arguments: "{}" } },
+  ];
+  const events = buildFunctionCallStreamEvents(tcs, 1);
+  assert.equal(events.length, 6); // 3 per call
+  // First call at output_index 1, second at 2
+  assert.equal(JSON.parse(events[0]).output_index, 1);
+  assert.equal(JSON.parse(events[3]).output_index, 2);
+});
+
+test("buildStreamDoneEvents: function calls are included before response.completed", () => {
+  const usage = { input_tokens: 10, output_tokens: 5, total_tokens: 15 };
+  const tcs: OpenAIToolCall[] = [
+    { id: "call_done", type: "function", function: { name: "lookup", arguments: "{\"id\":1}" } },
+  ];
+  const events = buildStreamDoneEvents("resp_fc", "msg_fc", "claude-sonnet-4-6", "", usage, tcs);
+  const types = events.map((e) => JSON.parse(e).type);
+  assert.deepEqual(types.slice(-4), [
+    "response.output_item.added",
+    "response.function_call_arguments.done",
+    "response.output_item.done",
+    "response.completed",
+  ]);
+  const completed = JSON.parse(events.at(-1) || "{}");
+  assert.equal(completed.response.output[1].type, "function_call");
+  assert.equal(completed.response.output[1].call_id, "call_done");
 });
 
 // ── No regression: existing chat types still work ─────────────────

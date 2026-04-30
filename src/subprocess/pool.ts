@@ -32,10 +32,10 @@ const refilling: Set<ClaudeModel> = new Set();
  * available, pop it; otherwise spawn fresh. Either way, kick off a background
  * refill so the next request also gets a warm subprocess.
  */
-export async function acquireSubprocess(model: ClaudeModel): Promise<ClaudeSubprocess> {
-  if (!ENABLED) {
+export async function acquireSubprocess(model: ClaudeModel, disallowedTools: string[] = []): Promise<ClaudeSubprocess> {
+  if (!ENABLED || disallowedTools.length > 0) {
     const sub = new ClaudeSubprocess();
-    await sub.prepare({ model });
+    await sub.prepare({ model, ...(disallowedTools.length > 0 ? { disallowedTools } : {}) });
     return sub;
   }
 

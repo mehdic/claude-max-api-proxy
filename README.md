@@ -162,7 +162,7 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `/metrics` | GET | Prometheus exposition. See "Metrics" below. |
 | `/models`, `/v1/models` | GET | List served model ids |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
-| `/responses`, `/v1/responses` | POST | Minimal OpenAI Responses API compatibility. Supports string/array `input`, `instructions`, usage/cost annotations, and basic streaming Responses SSE events |
+| `/responses`, `/v1/responses` | POST | Minimal OpenAI Responses API compatibility. Supports string/array `input`, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and basic streaming Responses SSE events |
 
 ### Metrics
 
@@ -180,6 +180,17 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 - `claude_proxy_runtime_default{runtime}` — gauge, 0/1
 
 The `model` label is canonicalized to a fixed set; unknown ids collapse to `other`. Reasons come from a fixed allowlist. No per-request labels.
+
+### Live soak / smoke
+
+Bounded live checks are available but intentionally separate from unit tests:
+
+```bash
+npm run soak:quick   # concurrency=1 fast path
+npm run soak         # default concurrency=2
+```
+
+The soak hits local `/health`, `/v1/models`, Chat Completions streaming/non-streaming, Responses streaming/non-streaming, early client abort handling, and bounded parallel fanout. Configure with `SOAK_BASE_URL`, `SOAK_MODEL`, `SOAK_CONCURRENCY`, and `SOAK_TIMEOUT_MS`.
 
 ## Wiring up clients
 
@@ -424,7 +435,7 @@ When an OpenAI-compatible caller (for example openclaw) includes `tools[]` in a 
 - The proxy does **not** execute those external tools. The caller dispatches them, preserving openclaw's audit, approval, and allowlist path.
 - Follow-up OpenAI `role: "tool"` messages are preserved in the prompt as `<tool_result ...>` blocks so Claude consumes the result rather than repeating the same external call.
 
-This bridge does not replace or disable Claude Code's native tools/capabilities. Native Claude Code capabilities remain available in the CLI context; the bridge only adds a way to ask the caller to run external OpenAI/OpenClaw tools.
+This bridge does not replace or disable Claude Code's native tools/capabilities. Native Claude Code capabilities remain available in the CLI context; the bridge only adds a way to ask the caller to run external OpenAI/OpenClaw tools. For a bridged request, the proxy also passes matching native MCP tool names through `--disallowedTools` so overlapping tools (for example `n8n__...` / `mcp__n8n__...`) cannot be executed inside Claude before the caller sees the OpenAI tool call.
 
 ### Tool modes and trade-offs
 

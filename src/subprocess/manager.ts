@@ -23,6 +23,7 @@ export interface SubprocessOptions {
   sessionId?: string;
   cwd?: string;
   timeout?: number;
+  disallowedTools?: string[];
 }
 
 export interface SubprocessEvents {
@@ -189,6 +190,10 @@ export class ClaudeSubprocess extends EventEmitter {
     // Support headless operation without permission prompts
     if (process.env.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true") {
       args.push("--dangerously-skip-permissions");
+    }
+
+    if (options.disallowedTools && options.disallowedTools.length > 0) {
+      args.push("--disallowedTools", options.disallowedTools.join(","));
     }
 
     if (options.sessionId) {

@@ -45,6 +45,23 @@ function allowedToolNames(req: Pick<OpenAIChatRequest, "tools" | "tool_choice">)
   return all;
 }
 
+export function externalNativeToolDisallowList(req: Pick<OpenAIChatRequest, "tools" | "tool_choice">): string[] {
+  if (!shouldBridgeExternalTools(req)) return [];
+  const names = Array.from(allowedToolNames(req));
+  const disallowed = new Set<string>();
+  for (const name of names) {
+    disallowed.add(name);
+    const marker = name.indexOf("__");
+    if (marker > 0) {
+      const server = name.slice(0, marker);
+      const tool = name.slice(marker + 2);
+      disallowed.add(`mcp__${server}__${tool}`);
+      disallowed.add(`mcp__${server}__${name}`);
+    }
+  }
+  return Array.from(disallowed).sort();
+}
+
 export function toolDefsToPrompt(req: Pick<OpenAIChatRequest, "tools" | "tool_choice">): string {
   if (!shouldBridgeExternalTools(req)) return "";
   const allowed = allowedToolNames(req);
@@ -65,6 +82,7 @@ export function toolDefsToPrompt(req: Pick<OpenAIChatRequest, "tools" | "tool_ch
   return `<claude_proxy_openai_tools>
 The following external OpenAI/OpenClaw tools are available in addition to your native Claude Code capabilities/tools.
 These external tools are dispatched by the caller (for example OpenClaw); the proxy will not execute them for you.
+If a listed external tool resembles or overlaps a native MCP/Claude Code tool name, do NOT invoke the native tool for this request. Return the JSON tool_call so the caller can dispatch it under its own audit and approval controls.
 To request one external tool, return ONLY a valid JSON object in this exact shape:
 {"tool_call":{"name":"tool_name","arguments":{}}}
 Use one of the external tool names listed below and fill arguments according to its schema.
