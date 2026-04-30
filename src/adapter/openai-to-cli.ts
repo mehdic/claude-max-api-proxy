@@ -3,7 +3,7 @@
  */
 
 import type { OpenAIChatRequest, OpenAIMessageContent } from "../types/openai.js";
-import { toolDefsToPrompt, toolResultToPrompt, assistantToolCallsToPrompt, shouldBridgeExternalTools } from "./tools.js";
+import { toolDefsToPrompt, toolResultToPrompt, assistantToolCallsToPrompt, shouldBridgeExternalTools, externalNativeToolDisallowList } from "./tools.js";
 
 export type ClaudeModel = "opus" | "sonnet" | "haiku" | string;
 
@@ -11,6 +11,7 @@ export interface CliInput {
   prompt: string;
   model: ClaudeModel;
   sessionId?: string;
+  disallowedTools?: string[];
 }
 
 const MODEL_MAP: Record<string, ClaudeModel> = {
@@ -150,9 +151,11 @@ export function messagesToPrompt(
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
+  const disallowedTools = externalNativeToolDisallowList(request);
   return {
     prompt: messagesToPrompt(request.messages, request),
     model: extractModel(request.model),
     sessionId: request.user, // Use OpenAI's user field for session mapping
+    ...(disallowedTools.length > 0 ? { disallowedTools } : {}),
   };
 }

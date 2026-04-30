@@ -172,7 +172,7 @@ export async function handleChatCompletions(
     const cliInput = openaiToCli(body);
     let subprocess: ClaudeSubprocess;
     try {
-      subprocess = await acquireSubprocess(cliInput.model);
+      subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
     } catch (err) {
       recordSpawnFailure("print");
       throw err;
@@ -724,7 +724,7 @@ async function handleResponsesNonStreaming(
   requestId: string,
 ): Promise<void> {
   const cliInput = openaiToCli(chatReq);
-  const subprocess = await acquireSubprocess(cliInput.model);
+  const subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
 
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
@@ -783,7 +783,7 @@ async function handleResponsesStreaming(
   requestModel: string,
 ): Promise<void> {
   const cliInput = openaiToCli(chatReq);
-  const subprocess = await acquireSubprocess(cliInput.model);
+  const subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
   const responseId = `resp_${requestId}`;
   const msgId = `msg_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
 
@@ -803,6 +803,7 @@ async function handleResponsesStreaming(
     let isComplete = false;
     let fullText = "";
     let lastModel = requestModel;
+    const bridgeTools = shouldBridgeExternalTools(chatReq);
 
     res.on("close", () => {
       if (!isComplete) subprocess.kill();
@@ -813,7 +814,9 @@ async function handleResponsesStreaming(
       const text = event.event.delta?.text || "";
       if (text && !res.writableEnded) {
         fullText += text;
-        res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+        if (!bridgeTools) {
+          res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+        }
       }
     });
 
@@ -825,9 +828,11 @@ async function handleResponsesStreaming(
       isComplete = true;
       if (!res.writableEnded) {
         annotateAndRecordUsage(result, cliInput.model);
-        if (!fullText) fullText = result.result || "";
+        const rawText = result.result || fullText;
+        const parsed = bridgeTools ? parseToolCalls(rawText, chatReq) : { toolCalls: [], textContent: rawText };
+        fullText = parsed.textContent || "";
         const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
-        const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, fullText, usage);
+        const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, fullText, usage, parsed.toolCalls);
         for (const evt of doneEvents) {
           const parsed = JSON.parse(evt);
           res.write(`event: ${parsed.type}\ndata: ${evt}\n\n`);

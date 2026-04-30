@@ -202,6 +202,15 @@ export interface ResponsesOutputMessageContent {
   annotations?: unknown[];
 }
 
+export interface ResponsesFunctionCallOutput {
+  type: "function_call";
+  id: string;
+  call_id: string;
+  name: string;
+  arguments: string; // JSON-encoded
+  status: "completed";
+}
+
 export interface ResponsesOutputMessage {
   type: "message";
   id: string;
@@ -209,6 +218,8 @@ export interface ResponsesOutputMessage {
   status: "completed";
   content: ResponsesOutputMessageContent[];
 }
+
+export type ResponsesOutputItem = ResponsesOutputMessage | ResponsesFunctionCallOutput;
 
 export interface ResponsesUsage {
   input_tokens: number;
@@ -229,7 +240,7 @@ export interface ResponsesResponse {
   object: "response";
   created_at: number;
   model: string;
-  output: ResponsesOutputMessage[];
+  output: ResponsesOutputItem[];
   output_text: string;
   status: "completed" | "failed" | "incomplete";
   usage: ResponsesUsage;

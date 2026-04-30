@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cliResultToOpenai, createDoneChunk, createToolCallChunks } from "../adapter/cli-to-openai.js";
-import { messagesToPrompt } from "../adapter/openai-to-cli.js";
-import { parseToolCalls, shouldBridgeExternalTools, toolDefsToPrompt } from "../adapter/tools.js";
+import { messagesToPrompt, openaiToCli } from "../adapter/openai-to-cli.js";
+import { externalNativeToolDisallowList, parseToolCalls, shouldBridgeExternalTools, toolDefsToPrompt } from "../adapter/tools.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliResult } from "../types/claude-cli.js";
 
@@ -45,6 +45,12 @@ test("tool instructions preserve Claude native capability composability", () => 
   assert.match(prompt, /in addition to your native Claude Code capabilities\/tools/);
   assert.match(prompt, /proxy will not execute them/);
   assert.match(prompt, /Do not treat this bridge as replacing or disabling Claude Code native tools\/capabilities/);
+});
+
+test("external bridge disallows overlapping native MCP tool names", () => {
+  const disallowed = externalNativeToolDisallowList(req());
+  assert.deepEqual(disallowed, ["mcp__n8n__n8n__n8n_list_workflows", "mcp__n8n__n8n_list_workflows", "n8n__n8n_list_workflows"]);
+  assert.deepEqual(openaiToCli(req()).disallowedTools, disallowed);
 });
 
 test("tool_choice none disables external bridge", () => {

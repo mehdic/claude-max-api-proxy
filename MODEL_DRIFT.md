@@ -37,3 +37,17 @@ Pick one for each row. None of these are bugs that block stream-json or the hard
 4. **Promote the aliases** — add them to `AVAILABLE_MODELS` so the openclaw plugin advertises them.
 
 The harden/review-fixes branch leaves all three lists exactly as they were on `main` so this audit can be discussed and resolved separately. Touch `MODEL_MAP` / `AVAILABLE_MODELS` / `handleModels` together when you do reconcile — that's the recipe in `infra/claude-proxy.md` ("Adding a new claude model").
+
+## Automated drift test (v1.0.4+)
+
+`src/__tests__/model-drift.test.ts` validates synchronization across all four sources of truth on every `npm test` run:
+
+1. Every `handleModels` id is routable via `MODEL_MAP`.
+2. Every `AVAILABLE_MODELS` id is in `handleModels`.
+3. Every `AVAILABLE_MODELS` id is routable via `MODEL_MAP`.
+4. `KNOWN_MODEL_LABELS` covers all `handleModels` ids (prevents `/metrics` cardinality leaks).
+5. Provider-prefixed variants (`claude-proxy/`, `claude-code-cli/`) resolve identically to bare ids.
+
+An informational log line lists MODEL_MAP entries that are routable but not advertised — this is non-fatal and expected for hidden/deprecated models. Promote or remove as needed.
+
+**When adding a new model:** update MODEL_MAP, AVAILABLE_MODELS, handleModels ids, KNOWN_MODEL_LABELS, AND the mirror arrays in `model-drift.test.ts`. The test will fail until all are in sync.

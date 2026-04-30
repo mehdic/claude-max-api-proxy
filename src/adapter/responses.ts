@@ -13,10 +13,13 @@ import type {
   ResponsesUsage,
   ResponsesMessageItem,
   ResponsesContentPart,
+  ResponsesOutputItem,
+  ResponsesFunctionCallOutput,
   OpenAIChatRequest,
   OpenAIChatMessage,
   OpenAIChatResponse,
   OpenAIUsage,
+  OpenAIToolCall,
 } from "../types/openai.js";
 
 /**
@@ -72,7 +75,28 @@ export function responsesToChatRequest(req: ResponsesRequest): OpenAIChatRequest
 }
 
 /**
+ * Convert Chat Completions tool_calls to Responses API function_call output items.
+ */
+export function toolCallsToFunctionCallOutputs(
+  toolCalls: OpenAIToolCall[],
+): ResponsesFunctionCallOutput[] {
+  return toolCalls.map((tc) => ({
+    type: "function_call" as const,
+    id: `fc_${tc.id}`,
+    call_id: tc.id,
+    name: tc.function.name,
+    arguments: tc.function.arguments,
+    status: "completed" as const,
+  }));
+}
+
+/**
  * Convert a Chat Completions response into a Responses API response.
+ *
+ * When the Chat Completions response contains tool_calls (from the external
+ * tool bridge), they are mapped to Responses API function_call output items.
+ * The proxy does NOT execute these tools — they are exposed so the caller
+ * can dispatch them under its own audit/approval controls.
  */
 export function chatResponseToResponses(
   chat: OpenAIChatResponse,
@@ -80,28 +104,36 @@ export function chatResponseToResponses(
 ): ResponsesResponse {
   const choice = chat.choices[0];
   const text = choice?.message?.content ?? "";
+  const toolCalls = choice?.message?.tool_calls;
   const msgId = `msg_${uuidv4().replace(/-/g, "").slice(0, 24)}`;
+
+  const output: ResponsesOutputItem[] = [
+    {
+      type: "message",
+      id: msgId,
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text,
+          annotations: [],
+        },
+      ],
+    },
+  ];
+
+  // Append function_call items for each tool_call.
+  if (toolCalls && toolCalls.length > 0) {
+    output.push(...toolCallsToFunctionCallOutputs(toolCalls));
+  }
 
   return {
     id: `resp_${requestId}`,
     object: "response",
     created_at: chat.created,
     model: chat.model,
-    output: [
-      {
-        type: "message",
-        id: msgId,
-        role: "assistant",
-        status: "completed",
-        content: [
-          {
-            type: "output_text",
-            text,
-            annotations: [],
-          },
-        ],
-      },
-    ],
+    output,
     output_text: text,
     status: "completed",
     usage: chatUsageToResponsesUsage(chat.usage),
@@ -188,6 +220,7 @@ export function buildStreamDoneEvents(
   model: string,
   fullText: string,
   usage: ResponsesUsage,
+  toolCalls: OpenAIToolCall[] = [],
 ): string[] {
   const createdAt = Math.floor(Date.now() / 1000);
   const events: string[] = [];
@@ -218,6 +251,11 @@ export function buildStreamDoneEvents(
     },
   }));
 
+  const functionCallOutputs = toolCallsToFunctionCallOutputs(toolCalls);
+  if (functionCallOutputs.length > 0) {
+    events.push(...buildFunctionCallStreamEvents(toolCalls, 1));
+  }
+
   events.push(JSON.stringify({
     type: "response.completed",
     response: {
@@ -231,12 +269,52 @@ export function buildStreamDoneEvents(
         role: "assistant",
         status: "completed",
         content: [{ type: "output_text", text: fullText, annotations: [] }],
-      }],
+      }, ...functionCallOutputs],
       output_text: fullText,
       status: "completed",
       usage,
     },
   }));
+
+  return events;
+}
+
+/**
+ * Build Responses API SSE events for function_call output items.
+ * These are appended after the message events when tool_calls are detected.
+ */
+export function buildFunctionCallStreamEvents(
+  toolCalls: OpenAIToolCall[],
+  startOutputIndex: number,
+): string[] {
+  const events: string[] = [];
+  const fcOutputs = toolCallsToFunctionCallOutputs(toolCalls);
+
+  for (let i = 0; i < fcOutputs.length; i++) {
+    const fc = fcOutputs[i];
+    const outputIndex = startOutputIndex + i;
+
+    events.push(JSON.stringify({
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: fc,
+    }));
+
+    events.push(JSON.stringify({
+      type: "response.function_call_arguments.done",
+      output_index: outputIndex,
+      item_id: fc.id,
+      call_id: fc.call_id,
+      name: fc.name,
+      arguments: fc.arguments,
+    }));
+
+    events.push(JSON.stringify({
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item: fc,
+    }));
+  }
 
   return events;
 }
