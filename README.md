@@ -51,7 +51,7 @@ The proxy itself does **not** store prompts, conversation history, OAuth tokens,
 ## Install & run
 
 ```bash
-git clone https://github.com/mehdic/claude-proxy.git
+git clone https://github.com/mehdic/openclaw-claude-proxy.git
 cd claude-proxy
 npm install
 npm run build
@@ -262,7 +262,7 @@ claude --version           # sanity check
 ```bash
 mkdir -p ~/.openclaw/projects
 cd ~/.openclaw/projects
-git clone https://github.com/mehdic/claude-proxy.git
+git clone https://github.com/mehdic/openclaw-claude-proxy.git
 cd claude-proxy
 npm install
 npm run build

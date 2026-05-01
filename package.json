@@ -41,12 +41,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mehdic/claude-proxy"
+    "url": "https://github.com/mehdic/openclaw-claude-proxy"
   },
   "bugs": {
-    "url": "https://github.com/mehdic/claude-proxy/issues"
+    "url": "https://github.com/mehdic/openclaw-claude-proxy/issues"
   },
-  "homepage": "https://github.com/mehdic/claude-proxy#readme",
+  "homepage": "https://github.com/mehdic/openclaw-claude-proxy#readme",
   "dependencies": {
     "express": "^4.21.2",
     "uuid": "^14.0.0"
