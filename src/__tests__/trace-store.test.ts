@@ -5,7 +5,7 @@ import type { TraceRecord } from "../trace/types.js";
 import { classifyError, isStreamLayerFault, isStreamLayerFaultClass } from "../errors.js";
 import { extractArgumentKeys, isSecretKey, redactToolChoice, redactEnv } from "../trace/redact.js";
 import { createTraceBuilder } from "../trace/builder.js";
-import { applyMcpPolicy, detectOverlappingTools } from "../mcp/governance.js";
+import { applyMcpPolicy, detectOverlappingTools, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { ResolvedMcpServer } from "../mcp/openclaw-config.js";
 import { createHeartbeatChunk, HEARTBEAT_CONTENT } from "../server/routes.js";
 import { parseToolCalls } from "../adapter/tools.js";
@@ -360,6 +360,19 @@ test("applyMcpPolicy: open policy passes all servers", () => {
   assert.equal(Object.keys(allowed).length, 2);
   assert.equal(decisions.length, 2);
   assert.ok(decisions.every((d) => d.action === "loaded"));
+});
+
+test("secretDecisionsToTrace: records secret audit metadata without values", () => {
+  const decisions = secretDecisionsToTrace([
+    { server: "github", envKey: "GITHUB_TOKEN", action: "secret_resolved" },
+    { server: "n8n", envKey: "N8N_API_KEY", action: "secret_unresolved", reason: "missing secret" },
+  ]);
+
+  assert.deepEqual(decisions, [
+    { server: "github", envKey: "GITHUB_TOKEN", action: "secret_resolved", reason: undefined },
+    { server: "n8n", envKey: "N8N_API_KEY", action: "secret_unresolved", reason: "missing secret" },
+  ]);
+  assert.equal(JSON.stringify(decisions).includes("actual-secret-value"), false);
 });
 
 test("detectOverlappingTools: detects overlaps", () => {

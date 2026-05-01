@@ -49,7 +49,22 @@ export interface ResolvedMcpServer {
   env: Record<string, string>;
 }
 
+export interface SecretResolutionDecision {
+  server: string;
+  envKey: string;
+  action: "secret_resolved" | "secret_unresolved";
+  reason?: string;
+}
+
 const RESOLVER_TIMEOUT_MS = 5000;
+
+/** Accumulated secret resolution decisions from last load — for trace/audit. */
+let lastSecretDecisions: SecretResolutionDecision[] = [];
+
+/** Return the secret resolution decisions from the most recent config load. */
+export function getSecretResolutionDecisions(): SecretResolutionDecision[] {
+  return lastSecretDecisions;
+}
 
 let cached: { servers: Record<string, ResolvedMcpServer>; loadedAt: number } | null = null;
 
@@ -134,6 +149,7 @@ export function loadOpenclawMcpServers(): Record<string, ResolvedMcpServer> {
   }
 
   const out: Record<string, ResolvedMcpServer> = {};
+  const secretDecisions: SecretResolutionDecision[] = [];
   for (const [name, server] of Object.entries(servers)) {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(server.env || {})) {
@@ -144,12 +160,18 @@ export function loadOpenclawMcpServers(): Record<string, ResolvedMcpServer> {
       } else if (isSecretRef(v) && v.id) {
         const providerValues = resolved.get(v.provider || "keychain") || {};
         const value = providerValues[v.id];
-        if (value !== undefined) env[k] = value;
-        else console.error(`[openclaw-config] unresolved secret ${v.id} for ${name}.${k} — skipping`);
+        if (value !== undefined) {
+          env[k] = value;
+          secretDecisions.push({ server: name, envKey: k, action: "secret_resolved" });
+        } else {
+          console.error(`[openclaw-config] unresolved secret ${v.id} for ${name}.${k} — skipping`);
+          secretDecisions.push({ server: name, envKey: k, action: "secret_unresolved", reason: `secret ${v.id} not resolved by provider ${v.provider || "keychain"}` });
+        }
       }
     }
     out[name] = { command: server.command, args: server.args || [], env };
   }
+  lastSecretDecisions = secretDecisions;
 
   console.error(`[openclaw-config] loaded ${Object.keys(out).length} MCP server(s) from ${path}`);
   cached = { servers: out, loadedAt: Date.now() };
@@ -159,4 +181,5 @@ export function loadOpenclawMcpServers(): Record<string, ResolvedMcpServer> {
 /** For tests: drop the cache so a subsequent load re-reads the file. */
 export function _clearCacheForTesting(): void {
   cached = null;
+  lastSecretDecisions = [];
 }

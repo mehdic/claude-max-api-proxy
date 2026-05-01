@@ -24,9 +24,11 @@ export interface TraceToolResult {
 
 export interface TraceMcpDecision {
   server: string;
-  action: "loaded" | "skipped" | "denied_by_policy" | "overlapping_tool_blocked";
+  action: "loaded" | "skipped" | "denied_by_policy" | "overlapping_tool_blocked" | "secret_resolved" | "secret_unresolved";
   reason?: string;
   tools?: string[];
+  /** For secret resolution decisions: the env key (not the secret value) */
+  envKey?: string;
 }
 
 export interface TraceRecord {

@@ -54,6 +54,7 @@ export function classifyError(err: unknown): ProtocolErrorClass {
 
   // Upstream faults
   if (msg.includes("upstream soft-dead") || msg.includes("upstream_dead")) return "upstream_soft_dead";
+  if (msg.includes("upstream hard-dead") || msg.includes("upstream_hard_dead")) return "upstream_hard_dead";
 
   // Model-layer errors
   if (msg.includes("rate limit") || msg.includes("429")) return "rate_limit";
