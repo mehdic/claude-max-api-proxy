@@ -19,6 +19,7 @@ export type ProtocolErrorClass =
   | "stdin_closed"
   | "worker_invalid"
   | "control_protocol"
+  | "unsupported_cli_flag"
   // Upstream faults
   | "upstream_soft_dead"
   | "upstream_hard_dead"
@@ -51,6 +52,7 @@ export function classifyError(err: unknown): ProtocolErrorClass {
   if (msg.includes("stdin not writable")) return "stdin_closed";
   if (msg.includes("subprocess not initialized") || msg.includes("subprocess is dead")) return "worker_invalid";
   if (msg.includes("control error")) return "control_protocol";
+  if (msg.includes("unknown option") || msg.includes("unknown argument")) return "unsupported_cli_flag";
 
   // Upstream faults
   if (msg.includes("upstream soft-dead") || msg.includes("upstream_dead")) return "upstream_soft_dead";
@@ -78,6 +80,7 @@ export function isStreamLayerFaultClass(cls: ProtocolErrorClass): boolean {
     case "stdin_closed":
     case "worker_invalid":
     case "control_protocol":
+    case "unsupported_cli_flag":
     case "other_stream_fault":
       return true;
     default:

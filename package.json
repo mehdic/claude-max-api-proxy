@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,10 @@
     "soak:quick": "SOAK_CONCURRENCY=1 node scripts/soak.mjs",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build",
-    "canary:stream-json": "npm run build && node scripts/canary-stream-json.mjs"
+    "canary:stream-json": "npm run build && node scripts/canary-stream-json.mjs",
+    "sdk:matrix": "node scripts/sdk-matrix.mjs",
+    "verify:live": "npm run soak:quick && npm run canary:stream-json && npm run sdk:matrix && npm run failure:sim",
+    "failure:sim": "node scripts/failure-sim.mjs"
   },
   "keywords": [
     "claude",
@@ -66,6 +69,7 @@
   "files": [
     "dist",
     "docs",
+    "scripts",
     "README.md",
     "CONTRIBUTING.md"
   ]

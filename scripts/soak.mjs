@@ -204,7 +204,7 @@ async function nonStreamingResponses() {
     if (json.object !== "response") throw new Error(`object=${json.object}`);
     if (json.status !== "completed") throw new Error(`status=${json.status}`);
     if (!json.output_text) throw new Error("empty output_text");
-    if (!json.usage?.input_tokens) throw new Error("missing usage.input_tokens");
+    if (!json.usage || typeof json.usage.input_tokens !== "number") throw new Error("missing usage.input_tokens");
     pass(label, `output_text="${json.output_text.slice(0, 40)}"`);
   } catch (e) {
     fail(label, e.message);

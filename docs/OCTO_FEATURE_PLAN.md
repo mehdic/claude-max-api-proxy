@@ -91,11 +91,11 @@ Deliverables:
 - ✅ Add streaming lifecycle events for function calls and completion aliases expected by common SDKs (`responses.ts` streaming path).
 - ✅ Preserve usage/cost annotations in both streaming and non-streaming Responses.
 - ✅ Fix non-streaming Responses trace: proper tool call detection, correct `finishReason`, tool call recording in trace (`routes.ts` Responses non-streaming handler).
-- ✅ Add adapter/event fixture tests for OpenAI Responses shapes used by OpenClaw-style clients; live Node/Python SDK smoke remains a follow-up because it requires client packages and live server orchestration.
+- ✅ Add adapter/event fixture tests plus live client matrix harness (`npm run sdk:matrix`) covering fetch wire compatibility, Python stdlib, and optional OpenAI Node/Python + LangChain clients when installed.
 
 Acceptance checks:
 
-- Chat and Responses both pass streaming/non-streaming unit/adapter tests; live soak remains operator-run because it requires Claude CLI auth and a running proxy.
+- Chat and Responses both pass streaming/non-streaming unit/adapter tests; live soak and SDK matrix are operator-run because they require Claude CLI auth and a running proxy.
 - ✅ Responses tool-call smoke returns function-call output items without native MCP execution leaks.
 
 ## Phase 5 — thin observability export
@@ -105,7 +105,8 @@ Goal: export useful traces without building an observability product inside the 
 Deliverables:
 
 - ✅ Optional span-shaped export for request, backend turn, fallback/error metadata, tool-call emission, and MCP governance decisions (`CLAUDE_PROXY_TRACE_EXPORT_URL`).
-- ✅ Redaction controls by design: prompts/tool argument values/env values are not exported; only metadata and argument keys leave the process.
+- ✅ Durable local SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH` for postmortems that survive process restarts.
+- ✅ Redaction controls by design: prompts/tool argument values/env values are not exported or persisted; only metadata and argument keys leave volatile memory.
 - ✅ Optional OpenInference-style attributes via `CLAUDE_PROXY_TRACE_EXPORT_FORMAT=openinference`; generic JSON is the default.
 
 Acceptance checks:
