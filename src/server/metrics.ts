@@ -44,7 +44,14 @@ const subprocessSpawnFailures: Record<string, number> = {};
 const tokenCounters: Record<string, number> = {};
 const costCounters: Record<string, number> = {};
 const errorClassCounters: Record<string, number> = {};
-const toolCallParseCounters = { success: 0, failure: 0, total_calls: 0 };
+export type ToolCallParseOutcome = "emitted" | "no_call" | "malformed" | "rejected";
+const toolCallParseCounters: Record<ToolCallParseOutcome, number> & { total_calls: number } = {
+  emitted: 0,
+  no_call: 0,
+  malformed: 0,
+  rejected: 0,
+  total_calls: 0,
+};
 
 /** Call from chat handlers when a request finishes. */
 export function recordRequest(rec: RequestRecord): void {
@@ -69,10 +76,9 @@ export function recordErrorClass(cls: ProtocolErrorClass): void {
   errorClassCounters[cls] = (errorClassCounters[cls] || 0) + 1;
 }
 
-export function recordToolCallParse(success: boolean, callCount: number): void {
-  if (success) toolCallParseCounters.success++;
-  else toolCallParseCounters.failure++;
-  toolCallParseCounters.total_calls += callCount;
+export function recordToolCallParse(outcome: ToolCallParseOutcome, callCount: number): void {
+  toolCallParseCounters[outcome]++;
+  toolCallParseCounters.total_calls += Math.max(0, callCount);
 }
 
 export function recordTokenUsage(
@@ -230,11 +236,13 @@ export function renderMetrics(): string {
     }
   }
 
-  // claude_proxy_tool_call_parse — tool call parse success/failure counters
-  lines.push("# HELP claude_proxy_tool_call_parse_total Tool call parse outcomes.");
+  // claude_proxy_tool_call_parse — tool call parse outcome counters
+  lines.push("# HELP claude_proxy_tool_call_parse_total Tool call parse outcomes for caller-dispatched tool bridge.");
   lines.push("# TYPE claude_proxy_tool_call_parse_total counter");
-  lines.push(`claude_proxy_tool_call_parse_total{outcome="success"} ${toolCallParseCounters.success}`);
-  lines.push(`claude_proxy_tool_call_parse_total{outcome="failure"} ${toolCallParseCounters.failure}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="emitted"} ${toolCallParseCounters.emitted}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="no_call"} ${toolCallParseCounters.no_call}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="malformed"} ${toolCallParseCounters.malformed}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="rejected"} ${toolCallParseCounters.rejected}`);
   lines.push(`claude_proxy_tool_call_parse_total{outcome="calls_emitted"} ${toolCallParseCounters.total_calls}`);
 
   // claude_proxy_trace_store — trace store gauge
@@ -254,8 +262,10 @@ export function resetMetrics(): void {
   for (const key of Object.keys(tokenCounters)) delete tokenCounters[key];
   for (const key of Object.keys(costCounters)) delete costCounters[key];
   for (const key of Object.keys(errorClassCounters)) delete errorClassCounters[key];
-  toolCallParseCounters.success = 0;
-  toolCallParseCounters.failure = 0;
+  toolCallParseCounters.emitted = 0;
+  toolCallParseCounters.no_call = 0;
+  toolCallParseCounters.malformed = 0;
+  toolCallParseCounters.rejected = 0;
   toolCallParseCounters.total_calls = 0;
 }
 

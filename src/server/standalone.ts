@@ -12,6 +12,7 @@ import { startServer, stopServer } from "./index.js";
 import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
 import { preWarm } from "../subprocess/init-pool.js";
 import { defaultRuntime } from "../subprocess/runtime.js";
+import { emitMcpInjectionWarning } from "../mcp/governance.js";
 
 const DEFAULT_PORT = 3456;
 
@@ -63,6 +64,9 @@ async function main(): Promise<void> {
       console.log(`[init-pool] Pre-warming ${models.length} model(s) in background...`);
       preWarm(models);
     }
+
+    // Emit MCP governance warning at startup if injection is enabled.
+    emitMcpInjectionWarning();
 
     console.log("\nServer ready. Test with:");
     console.log(`  curl -X POST http://localhost:${port}/v1/chat/completions \\`);

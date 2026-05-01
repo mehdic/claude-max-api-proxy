@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { acquireSubprocess } from "../subprocess/pool.js";
 import { acquireSession, returnSession, discardSession } from "../subprocess/session-pool.js";
-import { extractModel, openaiToCli } from "../adapter/openai-to-cli.js";
+import { extractModel, messagesToPrompt, openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
@@ -17,14 +17,14 @@ import {
   extractTextContent,
   resultUsageToOpenAI,
 } from "../adapter/cli-to-openai.js";
-import { parseToolCalls, shouldBridgeExternalTools } from "../adapter/tools.js";
+import { parseToolCalls, shouldBridgeExternalTools, type ToolCallParseResult } from "../adapter/tools.js";
 import type { OpenAIChatRequest, OpenAIChatChunk, ResponsesRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
 import { resolveRuntime, defaultRuntime } from "../subprocess/runtime.js";
 import { poolStats } from "../subprocess/session-pool.js";
-import { recordRequest, recordSpawnFailure, recordTokenUsage } from "./metrics.js";
+import { recordRequest, recordSpawnFailure, recordTokenUsage, recordToolCallParse, recordErrorClass } from "./metrics.js";
 import { pricingSnapshot } from "./pricing.js";
 import { annotateClaudeUsage, modelFromResult, usageFromClaudeResult } from "./usage.js";
 import { UPSTREAM_SOFT_DEAD_MS, shouldTriggerSoftDead, buildSoftDeadDiagnostic, sampleDescendants } from "./watchdog.js";
@@ -37,12 +37,51 @@ import {
   buildTextDeltaEvent,
   buildStreamDoneEvents,
 } from "../adapter/responses.js";
-import { classifyError, isStreamLayerFault } from "../errors.js";
+import { classifyError, isStreamLayerFault, type ProtocolErrorClass } from "../errors.js";
 import { createTraceBuilder, type TraceBuilder } from "../trace/builder.js";
 import { traceStore } from "../trace/store.js";
-import { mcpGovernanceSummary } from "../mcp/governance.js";
+import { detectOverlappingTools, isMcpInjectionEnabled, mcpGovernanceSummary } from "../mcp/governance.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
+
+// Cached Claude CLI version — resolved once at first health call.
+let cachedCliVersion: string | null = null;
+async function getCliVersion(): Promise<string> {
+  if (cachedCliVersion) return cachedCliVersion;
+  try {
+    const { verifyClaude } = await import("../subprocess/manager.js");
+    const result = await verifyClaude();
+    cachedCliVersion = result.version || "unknown";
+  } catch {
+    cachedCliVersion = "unknown";
+  }
+  return cachedCliVersion;
+}
+
+/**
+ * Record error class on metrics whenever we classify an error.
+ */
+function classifyAndRecordError(err: unknown): ProtocolErrorClass {
+  const cls = classifyError(err);
+  recordErrorClass(cls);
+  return cls;
+}
+
+/**
+ * Record tool call parse outcome on metrics.
+ */
+function recordToolCallParseOutcome(parsed: Pick<ToolCallParseResult, "toolCalls" | "diagnostics">, bridgeTools: boolean): void {
+  if (!bridgeTools) return;
+  if (parsed.toolCalls.length > 0) {
+    recordToolCallParse("emitted", parsed.toolCalls.length);
+  } else if (parsed.diagnostics.malformedJsonObjects > 0) {
+    recordToolCallParse("malformed", 0);
+  } else if (parsed.diagnostics.rejectedToolCalls > 0 || parsed.diagnostics.attemptedToolCall) {
+    recordToolCallParse("rejected", 0);
+  } else {
+    recordToolCallParse("no_call", 0);
+  }
+}
 
 /**
  * Non-rendering but non-empty assistant content.
@@ -168,7 +207,7 @@ export async function handleChatCompletions(
         await handleStreamJsonRequest(req, res, model, body, requestId, stream, tb);
         return;
       } catch (err) {
-        const errClass = classifyError(err);
+        const errClass = classifyAndRecordError(err);
         // Auto-fallback: only fires when CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE=1,
         // the failure is a recognized stream-layer fault, AND no SSE bytes
         // have been committed to the client yet.
@@ -317,7 +356,8 @@ async function handleStreamingResponse(
       if (!res.writableEnded) {
         annotateAndRecordUsage(result, cliInput.model);
         const rawText = result.result || bufferedText;
-        const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+        const parsed = parseToolCalls(rawText, body);
+        recordToolCallParseOutcome(parsed, bridgeTools);
         const finishReason = parsed.toolCalls.length > 0 ? "tool_calls" as const : "stop" as const;
         tb.setFinishReason(finishReason);
         tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
@@ -478,16 +518,23 @@ async function handleStreamJsonRequest(
   stream: boolean,
   tb: TraceBuilder,
 ): Promise<void> {
-  const acquired = await acquireSession(model, body.messages);
+  const cliInput = openaiToCli(body);
+  const acquired = await acquireSession(model, body.messages, { disallowedTools: cliInput.disallowedTools });
   const subprocess = acquired.subprocess;
   tb.setSessionWarmHit(acquired.isWarm);
 
   const bridgeTools = shouldBridgeExternalTools(body);
   tb.setBridgeTools(bridgeTools, body);
+  recordMcpGovernanceOnTrace(tb, subprocess, body);
 
   // For warm path, send only the new user message; for cold, send the full
-  // flattened conversation as one user message.
-  const userText = acquired.isWarm ? acquired.lastUserText : (acquired.flattenedPrompt ?? acquired.lastUserText);
+  // flattened conversation as one user message. External tool requests need
+  // the bridge instruction block in both paths, so reuse messagesToPrompt for
+  // the warm last-turn prompt and openaiToCli's full prompt for cold turns.
+  const lastMessage = body.messages[body.messages.length - 1];
+  const userText = acquired.isWarm
+    ? (bridgeTools ? messagesToPrompt([lastMessage], body) : acquired.lastUserText)
+    : cliInput.prompt;
 
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
@@ -670,7 +717,8 @@ async function handleStreamJsonRequest(
     annotateAndRecordUsage(result, model);
 
     const rawText = result.result || assistantText;
-    const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+    const parsed = parseToolCalls(rawText, body);
+    recordToolCallParseOutcome(parsed, bridgeTools);
 
     const finishReason = parsed.toolCalls.length > 0 ? "tool_calls" as const : "stop" as const;
     tb.setFinishReason(finishReason);
@@ -708,7 +756,7 @@ async function handleStreamJsonRequest(
     }
 
     // Re-pool the subprocess for the next turn in this conversation.
-    returnSession(subprocess, model, body.messages, assistantText);
+    returnSession(subprocess, model, body.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
   } catch (err) {
     // If the watchdog already fired and handled cleanup, skip duplicate work.
     if (watchdogFired) return;
@@ -734,6 +782,24 @@ async function handleStreamJsonRequest(
   }
 }
 
+
+function recordMcpGovernanceOnTrace(
+  tb: TraceBuilder,
+  subprocess: { getMcpDecisions?: () => import("../trace/types.js").TraceMcpDecision[] },
+  body: Pick<OpenAIChatRequest, "tools" | "tool_choice">,
+): void {
+  const decisions = subprocess.getMcpDecisions?.() || [];
+  for (const d of decisions) tb.addMcpDecision(d);
+
+  if (!isMcpInjectionEnabled() || !shouldBridgeExternalTools(body)) return;
+  const loadedServerNames = decisions.filter((d) => d.action === "loaded").map((d) => d.server);
+  if (loadedServerNames.length === 0) return;
+  const callerToolNames = (body.tools || [])
+    .filter((tool) => tool.type === "function" && tool.function?.name)
+    .map((tool) => tool.function.name);
+  const pseudoServers = Object.fromEntries(loadedServerNames.map((name) => [name, { command: "", args: [], env: {} }]));
+  for (const d of detectOverlappingTools(callerToolNames, pseudoServers)) tb.addMcpDecision(d);
+}
 function annotateAndRecordUsage(result: ClaudeCliResult, requestedModel: string): void {
   annotateClaudeUsage(result, requestedModel);
   recordTokenUsage(modelFromResult(result, requestedModel), usageFromClaudeResult(result), result.cost, Boolean(result.usageEstimated));
@@ -777,6 +843,7 @@ export async function handleResponses(
   const body = req.body as ResponsesRequest;
   const stream = body.stream === true;
   const reqStart = Date.now();
+  let usedRuntime: "stream-json" | "print" = "print";
 
   const tb = createTraceBuilder({
     traceId,
@@ -786,12 +853,10 @@ export async function handleResponses(
     stream,
     endpoint: "responses",
   });
-  tb.setRuntime("print");
 
-  // Responses compatibility currently reuses the stable --print transport path.
   res.on("close", () => {
     const status: "ok" | "error" = res.statusCode >= 400 ? "error" : "ok";
-    recordRequest({ runtime: "print", model: canonicalizeModelLabel(body.model), status, durationMs: Date.now() - reqStart });
+    recordRequest({ runtime: usedRuntime, model: canonicalizeModelLabel(body.model), status, durationMs: Date.now() - reqStart });
   });
 
   try {
@@ -815,7 +880,11 @@ export async function handleResponses(
     const chatReq = responsesToChatRequest(body);
     tb.setBridgeTools(shouldBridgeExternalTools(chatReq), chatReq);
 
-    if (stream) {
+    usedRuntime = resolveRuntime(req);
+    tb.setRuntime(usedRuntime);
+    if (usedRuntime === "stream-json") {
+      await handleResponsesStreamJson(req, res, chatReq, requestId, body.model, stream, tb);
+    } else if (stream) {
       await handleResponsesStreaming(req, res, chatReq, requestId, body.model, tb);
     } else {
       await handleResponsesNonStreaming(res, chatReq, requestId, tb);
@@ -830,6 +899,121 @@ export async function handleResponses(
         error: { message, type: "server_error", code: null },
       });
     }
+  }
+}
+
+
+/**
+ * Responses API via the warm stream-json runtime. Mirrors the chat stream-json
+ * transport but reshapes output into Responses envelopes/events.
+ */
+async function handleResponsesStreamJson(
+  _req: Request,
+  res: Response,
+  chatReq: OpenAIChatRequest,
+  requestId: string,
+  requestModel: string,
+  stream: boolean,
+  tb: TraceBuilder,
+): Promise<void> {
+  const model = extractModel(chatReq.model);
+  const cliInput = openaiToCli(chatReq);
+  const acquired = await acquireSession(model, chatReq.messages, { disallowedTools: cliInput.disallowedTools });
+  const subprocess = acquired.subprocess;
+  const bridgeTools = shouldBridgeExternalTools(chatReq);
+  tb.setSessionWarmHit(acquired.isWarm);
+  recordMcpGovernanceOnTrace(tb, subprocess, chatReq);
+
+  const responseId = `resp_${requestId}`;
+  const msgId = `msg_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
+  let assistantText = "";
+  let lastModel = requestModel;
+  let done = false;
+
+  if (stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Request-Id", requestId);
+    setTraceHeader(res, tb.traceId);
+    res.flushHeaders();
+    const envelope = buildResponsesStreamEvents(responseId, msgId, requestModel);
+    res.write(`event: response.created\ndata: ${envelope.created}\n\n`);
+    res.write(`event: response.output_item.added\ndata: ${envelope.itemAdded}\n\n`);
+    res.write(`event: response.content_part.added\ndata: ${envelope.partAdded}\n\n`);
+  } else {
+    setTraceHeader(res, tb.traceId);
+  }
+
+  const onContentDelta = (event: ClaudeCliStreamEvent) => {
+    const text = event.event.delta?.text || "";
+    if (!text) return;
+    assistantText += text;
+    if (stream && !bridgeTools && !res.writableEnded) {
+      res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+    }
+  };
+  const onAssistant = (message: ClaudeCliAssistant) => {
+    lastModel = message.message.model;
+    if (!assistantText) assistantText = extractTextContent(message);
+  };
+
+  subprocess.on("content_delta", onContentDelta);
+  subprocess.on("assistant", onAssistant);
+
+  res.on("close", () => {
+    if (!done) discardSession(subprocess);
+  });
+
+  try {
+    const lastMessage = chatReq.messages[chatReq.messages.length - 1];
+    const userText = acquired.isWarm
+      ? (bridgeTools ? messagesToPrompt([lastMessage], chatReq) : acquired.lastUserText)
+      : cliInput.prompt;
+    const result = await subprocess.submitTurn(userText);
+    done = true;
+    annotateAndRecordUsage(result, cliInput.model);
+    const resultForAdapters: ClaudeCliResult = { ...result, result: result.result || assistantText };
+    const rawText = resultForAdapters.result || assistantText;
+    const parsed = parseToolCalls(rawText, chatReq);
+
+    tb.setFinishReason(parsed.toolCalls.length > 0 ? "tool_calls" : "stop");
+    tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
+    for (const tc of parsed.toolCalls) tb.addToolCall(tc);
+    recordToolCallParseOutcome(parsed, bridgeTools);
+    recordUsageOnTrace(tb, result);
+    tb.commit();
+
+    const assistantForPool = parsed.toolCalls.length > 0 ? rawText : parsed.textContent;
+    returnSession(subprocess, model, chatReq.messages, assistantForPool, { disallowedTools: cliInput.disallowedTools });
+
+    if (stream && !res.writableEnded) {
+      const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
+      const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, parsed.textContent, usage, parsed.toolCalls);
+      for (const evt of doneEvents) {
+        const parsedEvt = JSON.parse(evt);
+        res.write(`event: ${parsedEvt.type}\ndata: ${evt}\n\n`);
+      }
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      const chatResponse = cliResultToOpenai(resultForAdapters, requestId, chatReq);
+      res.json(chatResponseToResponses(chatResponse, requestId));
+    }
+  } catch (error) {
+    done = true;
+    discardSession(subprocess);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    tb.setError(classifyAndRecordError(error), message);
+    tb.commit();
+    if (stream && !res.writableEnded) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: { message, type: "server_error" } })}\n\n`);
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      res.status(500).json({ error: { message, type: "server_error", code: null } });
+    }
+  } finally {
+    subprocess.off("content_delta", onContentDelta);
+    subprocess.off("assistant", onAssistant);
   }
 }
 
@@ -868,7 +1052,13 @@ async function handleResponsesNonStreaming(
         annotateAndRecordUsage(finalResult, cliInput.model);
         const chatResponse = cliResultToOpenai(finalResult, requestId, chatReq);
         const responsesResponse = chatResponseToResponses(chatResponse, requestId);
-        tb.setFinishReason("stop");
+        const hasToolCalls = chatResponse.choices[0]?.message?.tool_calls && chatResponse.choices[0].message.tool_calls.length > 0;
+        const finishReason = hasToolCalls ? "tool_calls" as const : (chatResponse.choices[0]?.finish_reason as "stop" | "tool_calls" || "stop");
+        tb.setFinishReason(finishReason);
+        if (chatResponse.choices[0]?.message?.tool_calls) {
+          for (const tc of chatResponse.choices[0].message.tool_calls) tb.addToolCall(tc);
+          recordToolCallParse("emitted", chatResponse.choices[0].message.tool_calls.length);
+        }
         recordUsageOnTrace(tb, finalResult);
         tb.commit();
         res.json(responsesResponse);
@@ -890,7 +1080,7 @@ async function handleResponsesNonStreaming(
       subprocess.submit(cliInput.prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      tb.setError(classifyError(error), message);
+      tb.setError(classifyAndRecordError(error), message);
       tb.commit();
       res.status(500).json({
         error: { message, type: "server_error", code: null },
@@ -960,13 +1150,14 @@ async function handleResponsesStreaming(
       if (!res.writableEnded) {
         annotateAndRecordUsage(result, cliInput.model);
         const rawText = result.result || fullText;
-        const parsed = bridgeTools ? parseToolCalls(rawText, chatReq) : { toolCalls: [], textContent: rawText };
+        const parsed = parseToolCalls(rawText, chatReq);
         fullText = parsed.textContent || "";
         const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
         const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, fullText, usage, parsed.toolCalls);
 
         tb.setFinishReason(parsed.toolCalls.length > 0 ? "tool_calls" : "stop");
         for (const tc of parsed.toolCalls) tb.addToolCall(tc);
+        recordToolCallParseOutcome(parsed, bridgeTools);
         recordUsageOnTrace(tb, result);
         tb.commit();
 
@@ -1058,11 +1249,15 @@ export function handlePricing(_req: Request, res: Response): void {
  * and the HTTP listener is bound. No subprocess work. Use this for
  * load-balancer-style health checks.
  */
-export function handleHealth(_req: Request, res: Response): void {
+export async function handleHealth(_req: Request, res: Response): Promise<void> {
+  const cliVersion = await getCliVersion();
   res.json({
     status: "ok",
     provider: "claude-code-cli",
     timestamp: new Date().toISOString(),
+    runtime: defaultRuntime(),
+    claude_cli_version: cliVersion,
+    pool: poolStats(),
     trace: traceStore.stats(),
     mcp: mcpGovernanceSummary(),
   });

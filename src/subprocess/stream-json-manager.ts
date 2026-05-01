@@ -34,6 +34,7 @@ import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { getSecretResolutionDecisions, loadOpenclawMcpServers, type ResolvedMcpServer } from "../mcp/openclaw-config.js";
 import { applyMcpPolicy, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { TraceMcpDecision } from "../trace/types.js";
+import { parseStreamJsonLine } from "./stream-json-parser.js";
 
 const INIT_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 900000;
@@ -93,6 +94,8 @@ function buildOptionAMcpServers(): Record<string, ResolvedMcpServer> {
 export interface StreamJsonOptions {
   model: ClaudeModel;
   cwd?: string;
+  /** Per-process native Claude tool deny-list. Used for MCP overlap safety. */
+  disallowedTools?: string[];
 }
 
 export class StreamJsonSubprocess extends EventEmitter {
@@ -106,6 +109,7 @@ export class StreamJsonSubprocess extends EventEmitter {
   private turnInFlight: boolean = false;
   private lastProcessActivityAt: number = 0;
   private processActivityCount: number = 0;
+  private mcpDecisions: TraceMcpDecision[] = [];
 
   /** Spawn the subprocess and complete the initialize handshake. */
   async start(options: StreamJsonOptions): Promise<void> {
@@ -116,8 +120,13 @@ export class StreamJsonSubprocess extends EventEmitter {
       "--include-partial-messages",
       "--model", options.model,
       "--no-session-persistence",
-      "--exclude-dynamic-system-prompt-sections",
     ];
+    // This Claude CLI flag has existed in some builds and disappeared in
+    // others. Keep it opt-in so a CLI update cannot break the whole persistent
+    // runtime at spawn time.
+    if (process.env.CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS === "1") {
+      args.push("--exclude-dynamic-system-prompt-sections");
+    }
     if (process.env.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true") {
       args.push("--dangerously-skip-permissions");
     }
@@ -132,9 +141,16 @@ export class StreamJsonSubprocess extends EventEmitter {
     if (process.env.CLAUDE_PROXY_TOOLS_TRANSLATION === "1") {
       console.error("[MCP] WARNING: CLAUDE_PROXY_TOOLS_TRANSLATION=1 — inner Claude CLI will execute MCP tools directly. OpenClaw audit/approval is bypassed for injected tools.");
       const mcpServers = buildOptionAMcpServers();
+      this.mcpDecisions = [...lastMcpDecisions];
       if (Object.keys(mcpServers).length > 0) {
         args.push("--mcp-config", JSON.stringify({ mcpServers }));
       }
+    } else {
+      this.mcpDecisions = [];
+    }
+
+    if (options.disallowedTools && options.disallowedTools.length > 0) {
+      args.push("--disallowedTools", options.disallowedTools.join(","));
     }
 
     this.model = options.model;
@@ -294,17 +310,15 @@ export class StreamJsonSubprocess extends EventEmitter {
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      let msg: ClaudeCliMessage | { type: "control_response"; response: { request_id: string; subtype: string; error?: string } };
-      try {
-        msg = JSON.parse(trimmed);
-      } catch {
-        this.emit("raw", trimmed);
+      const parsed = parseStreamJsonLine(trimmed);
+      if (parsed.kind === "empty") continue;
+      if (parsed.kind === "malformed") {
+        this.emit("raw", parsed.raw);
         continue;
       }
 
-      const t = (msg as { type?: string }).type;
-      if (t === "control_response") {
-        const cr = msg as { type: "control_response"; response: { request_id: string; subtype: string; error?: string } };
+      if (parsed.kind === "control_response") {
+        const cr = parsed.value;
         const reqId = cr.response?.request_id;
         const cb = this.pendingControl.get(reqId);
         if (cb) {
@@ -315,8 +329,8 @@ export class StreamJsonSubprocess extends EventEmitter {
         continue;
       }
 
-      this.emit("message", msg as ClaudeCliMessage);
-      const m = msg as ClaudeCliMessage;
+      this.emit("message", parsed.value as ClaudeCliMessage);
+      const m = parsed.value as ClaudeCliMessage;
       if (isContentDelta(m)) this.emit("content_delta", m as ClaudeCliStreamEvent);
       else if (isAssistantMessage(m)) this.emit("assistant", m as ClaudeCliAssistant);
       else if (isResultMessage(m)) this.emit("result", m as ClaudeCliResult);
@@ -349,6 +363,10 @@ export class StreamJsonSubprocess extends EventEmitter {
 
   getModel(): ClaudeModel | null {
     return this.model;
+  }
+
+  getMcpDecisions(): TraceMcpDecision[] {
+    return [...this.mcpDecisions];
   }
 
   getAge(): number {

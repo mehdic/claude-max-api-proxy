@@ -12,7 +12,27 @@ import type { OpenAIChatMessage, OpenAIChatRequest, OpenAITool, OpenAIToolCall }
 export interface ToolCallParseResult {
   toolCalls: OpenAIToolCall[];
   textContent: string;
+  /** Structured parser diagnostics. No prompt/tool argument values. */
+  diagnostics: ToolCallParseDiagnostics;
 }
+
+export interface ToolCallParseDiagnostics {
+  /** Number of syntactically valid JSON objects scanned. */
+  jsonObjects: number;
+  /** Number of JSON-looking spans that could not be parsed. */
+  malformedJsonObjects: number;
+  /** Number of JSON objects that looked like tool calls but were not allowed/valid. */
+  rejectedToolCalls: number;
+  /** True when the output appeared to attempt a bridged tool call but none could be emitted. */
+  attemptedToolCall: boolean;
+}
+
+const EMPTY_DIAGNOSTICS: ToolCallParseDiagnostics = {
+  jsonObjects: 0,
+  malformedJsonObjects: 0,
+  rejectedToolCalls: 0,
+  attemptedToolCall: false,
+};
 
 export function isSchemaStyleTool(tool: OpenAITool): boolean {
   const name = tool.function.name || "";
@@ -95,20 +115,38 @@ ${JSON.stringify(tools)}
 }
 
 export function parseToolCalls(text: string, req: Pick<OpenAIChatRequest, "tools" | "tool_choice">): ToolCallParseResult {
-  if (!shouldBridgeExternalTools(req)) return { toolCalls: [], textContent: text };
+  if (!shouldBridgeExternalTools(req)) return { toolCalls: [], textContent: text, diagnostics: { ...EMPTY_DIAGNOSTICS } };
   const allowed = allowedToolNames(req);
   const toolCalls: OpenAIToolCall[] = [];
   const spans: Array<{ start: number; end: number }> = [];
+  const diagnostics: ToolCallParseDiagnostics = {
+    jsonObjects: 0,
+    malformedJsonObjects: countMalformedJsonObjectCandidates(text),
+    rejectedToolCalls: 0,
+    attemptedToolCall: /tool_call|"name"\s*:|"arguments"\s*:|"parameters"\s*:/i.test(text),
+  };
 
   for (const found of iterJsonObjects(text)) {
+    diagnostics.jsonObjects++;
     if (spans.some((span) => found.start >= span.start && found.end <= span.end)) continue;
     const candidate = found.value.tool_call && typeof found.value.tool_call === "object"
       ? found.value.tool_call
       : found.value;
     const call = candidate as Record<string, unknown>;
-    if (typeof call.name !== "string") continue;
+    if (typeof call.name !== "string") {
+      if (looksLikeToolCallCandidate(found.value)) {
+        diagnostics.rejectedToolCalls++;
+        spans.push({ start: found.start, end: found.end });
+      }
+      continue;
+    }
+    diagnostics.attemptedToolCall = true;
     const toolName = normalizeRequestedToolName(call.name, allowed);
-    if (!toolName) continue;
+    if (!toolName) {
+      diagnostics.rejectedToolCalls++;
+      spans.push({ start: found.start, end: found.end });
+      continue;
+    }
     const rawArgs = call.arguments ?? call.parameters;
     const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
       ? rawArgs as Record<string, unknown>
@@ -130,7 +168,7 @@ export function parseToolCalls(text: string, req: Pick<OpenAIChatRequest, "tools
     .replace(/```(?:json)?\s*```/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return { toolCalls, textContent };
+  return { toolCalls, textContent, diagnostics };
 }
 
 export function toolResultToPrompt(msg: OpenAIChatMessage): string {
@@ -176,6 +214,31 @@ export function iterJsonObjects(text: string): Array<{ value: Record<string, unk
     }
   }
   return out;
+}
+
+
+function looksLikeToolCallCandidate(value: Record<string, unknown>): boolean {
+  if (value.tool_call !== undefined) return true;
+  return value.name !== undefined && (value.arguments !== undefined || value.parameters !== undefined);
+}
+
+function countMalformedJsonObjectCandidates(text: string): number {
+  if (!/tool_call|"name"\s*:|"arguments"\s*:|"parameters"\s*:/i.test(text)) return 0;
+  const opens = (text.match(/\{/g) || []).length;
+  const closes = (text.match(/\}/g) || []).length;
+  if (opens > closes) return 1;
+
+  let malformed = 0;
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```|\{[\s\S]*?\}/gi)) {
+    const candidate = (match[1] || match[0]).trim();
+    if (!/tool_call|"name"\s*:|"arguments"\s*:|"parameters"\s*:/i.test(candidate)) continue;
+    try {
+      JSON.parse(stripJsonFence(candidate));
+    } catch {
+      malformed++;
+    }
+  }
+  return malformed;
 }
 
 function normalizeRequestedToolName(name: string, allowed: Set<string>): string | null {
