@@ -11,6 +11,7 @@
  */
 
 import type { TraceRecord, TraceListItem } from "./types.js";
+import { exportTrace } from "./exporter.js";
 
 const DEFAULT_CAPACITY = 200;
 const DEFAULT_TTL_MS = 3_600_000; // 1 hour
@@ -43,6 +44,7 @@ export class TraceStore {
     // Move to end (most recently accessed)
     this.traces.delete(trace.traceId);
     this.traces.set(trace.traceId, trace);
+    if (trace.completedAt !== undefined) exportTrace(trace);
   }
 
   /**

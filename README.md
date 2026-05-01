@@ -83,7 +83,7 @@ curl -s -X POST http://127.0.0.1:3456/chat/completions \
 Implemented in the current release:
 
 - OpenAI-compatible Chat Completions with streaming/non-streaming support.
-- Minimal OpenAI Responses API with string/array input, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and basic streaming events.
+- Practical OpenAI Responses API compatibility on the same selected runtime as chat completions (`stream-json` by default, `print` fallback/override), with string/array input, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and streaming lifecycle events.
 - Persistent `stream-json` Claude runtime by default, plus `--print` fallback mode.
 - Init-pool and session-pool for lower cold/warm latency and better prompt-cache behavior.
 - Runtime override and fallback controls for debugging and incident response.
@@ -189,7 +189,7 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `/metrics` | GET | Prometheus exposition. See "Metrics" below. |
 | `/models`, `/v1/models` | GET | List served model ids |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
-| `/responses`, `/v1/responses` | POST | Minimal OpenAI Responses API compatibility. Supports string/array `input`, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and basic streaming Responses SSE events |
+| `/responses`, `/v1/responses` | POST | Practical OpenAI Responses API compatibility. Uses the selected runtime (`stream-json` by default), supports string/array `input`, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and streaming Responses SSE events |
 | `/traces` | GET | List recent traces (summary). Localhost-only. Query: `?limit=50&offset=0`. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
 | `/traces/:id` | GET | Get full trace record by trace ID. Localhost-only. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
 
@@ -560,17 +560,32 @@ If you find yourself bumping `agents.tools.exec.timeoutSec` to several minutes t
 src/
 ├── adapter/
 │   ├── openai-to-cli.ts       # OpenAI request → claude CLI input
-│   └── cli-to-openai.ts       # claude output → OpenAI response (incl. cache stats)
+│   ├── cli-to-openai.ts       # claude output → OpenAI response (incl. cache stats)
+│   ├── responses.ts           # Responses API translation (OpenAI Responses ↔ Chat Completions)
+│   └── tools.ts               # caller-dispatched tool bridge + MCP injection config
 ├── subprocess/
 │   ├── manager.ts             # --print mode subprocess
 │   ├── pool.ts                # warm-pool scaffold (disabled — see code comment)
 │   ├── stream-json-manager.ts # stream-json mode subprocess + control_request handshake
 │   ├── init-pool.ts           # per-model pre-initialized stream-json pool
-│   └── session-pool.ts        # per-conversation pool keyed by hash(model, system+user)
+│   ├── session-pool.ts        # per-conversation pool keyed by hash(model, system+user)
+│   └── runtime.ts             # runtime resolution (stream-json vs print)
 ├── server/
 │   ├── index.ts               # Express setup
-│   ├── routes.ts              # endpoint handlers (incl. SSE keepalive in stream-json path)
-│   └── standalone.ts          # entry point + boot-time pre-warm
+│   ├── routes.ts              # endpoint handlers (incl. SSE keepalive, tool parse/error recording)
+│   ├── standalone.ts          # entry point + boot-time pre-warm + MCP injection warning
+│   ├── metrics.ts             # Prometheus /metrics exposition (hand-rolled, no prom-client)
+│   └── pricing.ts             # usage/cost estimation
+├── trace/
+│   ├── builder.ts             # per-request TraceBuilder (trace_id, tool calls, MCP decisions)
+│   ├── store.ts               # bounded in-memory trace store with LRU + TTL eviction
+│   ├── exporter.ts            # optional redacted trace export (generic/OpenInference-shaped)
+│   ├── redact.ts              # secret/path redaction for trace records
+│   └── types.ts               # TraceMcpDecision, TraceRecord types
+├── mcp/
+│   ├── governance.ts          # allow/deny policy, overlapping tool detection, startup warning
+│   └── openclaw-config.ts     # openclaw.json MCP server loader + secret resolution
+├── errors.ts                  # ProtocolErrorClass taxonomy (bounded, Prometheus-safe)
 └── types/                     # OpenAI + Claude CLI type definitions
 ```
 
@@ -578,14 +593,18 @@ src/
 
 The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
-Recommended next work, in order:
+**Completed (phases 1–5):**
 
-1. **Stream-json hardening** — fixture tests for malformed/partial/interleaved Claude events, protocol error classes, canary checks after Claude CLI updates, and better fallback metrics.
-2. **Tool trace/replay** — request trace IDs, redacted recent traces, parse source, emitted `tool_calls`, tool-result reinjection, fallback path, and error class.
-3. **MCP governance mode** — keep caller-dispatched OpenAI/OpenClaw tools as the safe default; treat inner MCP injection as privileged/debug mode with explicit policy, warnings, and trace records.
-4. **Responses practical parity** — bring Responses onto the warm `stream-json` path where feasible and add client-needed streaming/tool-call lifecycle events.
-5. **Thin observability export** — optional OpenTelemetry/Langfuse-style spans with redaction, disabled by default.
-6. **Later, only if useful** — context compression on session eviction, artifact/file output endpoints, semantic cache, or cross-provider routing.
+1. **Transport hardening** — protocol error classes, `upstream_hard_dead` classification, Claude CLI version in `/health`, fixture parser tests, fallback metrics.
+2. **Tool trace/replay** — stable `trace_id` per request, bounded in-memory trace store with LRU+TTL, redacted trace records, `GET /traces` and `/traces/:id` localhost-gated endpoints, semantic tool-parse metrics (`emitted`/`no_call`/`malformed`/`rejected`), and bounded protocol-error metrics wired into routes.
+3. **MCP governance mode** — allow/deny policy (`CLAUDE_PROXY_MCP_ALLOW`/`DENY`), native Claude tool deny-list propagation for overlapping caller-dispatched tools, startup warning when MCP injection is enabled, secret resolution tracing (no secret values in traces), and structured audit decisions in trace records.
+4. **Responses API parity** — Responses now uses the same selected runtime path as chat completions where feasible (`stream-json` by default), with text/function-call output items, streaming lifecycle, usage/cost annotations, tool call detection, and trace recording.
+5. **Thin observability export** — optional redacted span-shaped trace export (`generic` or OpenInference-style attributes), disabled by default and fire-and-forget so exporter failures never affect requests.
+
+**Remaining work:**
+
+6. **SDK fixture tests** — expand beyond current adapter/event fixtures into live OpenAI Node/Python client smoke coverage for OpenClaw, LangChain, and local tooling.
+7. **Later, only if useful** — context compression on session eviction, artifact/file output endpoints, semantic cache, or cross-provider routing.
 
 Deprioritized: building a full router, workflow engine, or generic MCP platform inside this repo. That is how a proxy becomes a haunted appliance with a changelog.
 

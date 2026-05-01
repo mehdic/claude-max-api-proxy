@@ -34,18 +34,18 @@ Goal: make `stream-json` boring. Boring is the dream.
 
 Deliverables:
 
-- Fixture-based parser tests for partial, malformed, interleaved, and unexpected Claude CLI stream events.
-- Explicit protocol-error classes with bounded Prometheus labels.
-- Canary script that runs after a Claude CLI update and validates handshake, first token, usage fields, tool calls, and graceful shutdown.
-- Stronger stream-json to print fallback classification before bytes are committed.
-- More visible health output: Claude CLI version, selected runtime, init-pool state, session-pool state, and last protocol error class.
+- ✅ Fixture-based parser tests for partial, malformed, interleaved, and unexpected Claude CLI stream events.
+- ✅ Explicit protocol-error classes with bounded Prometheus labels (`ProtocolErrorClass` taxonomy in `errors.ts`, including `upstream_hard_dead`).
+- ✅ Canary script that runs after a Claude CLI update and validates handshake, first token, usage fields, tool calls, and graceful shutdown (`npm run canary:stream-json`).
+- ✅ Stronger stream-json to print fallback classification before bytes are committed (`classifyFallbackReason` in `routes.ts`).
+- ✅ More visible health output: Claude CLI version, selected runtime, init-pool state, session-pool state, and last protocol error class (`/health` endpoint enhanced in `routes.ts`).
 
 Acceptance checks:
 
-- `npm run build`
-- `npm test`
+- ✅ `npm run build`
+- ✅ `npm test` (181 tests pass)
 - `npm run soak:quick`
-- local stream-json canary against all advertised models
+- local stream-json canary against all advertised models (`npm run canary:stream-json`; requires live Claude CLI auth)
 
 ## Phase 2 — tool trace and replay
 
@@ -53,15 +53,15 @@ Goal: make prompt-based tool bridging debuggable instead of mystical.
 
 Deliverables:
 
-- Generate a stable `trace_id` per request and return it in `X-Claude-Proxy-Trace-Id`.
-- Record recent in-memory traces with redaction: model, runtime, tools offered, tool choice, parsed JSON source, emitted `tool_calls`, tool results reinjected, finish reason, fallback path, error class.
-- Add optional `GET /traces/:id` for local debugging, gated to localhost and disabled unless explicitly enabled if needed.
-- Add tests for trace records around normal text, single tool call, malformed tool JSON, streaming tool call, and tool-result follow-up.
+- ✅ Generate a stable `trace_id` per request and return it in `X-Claude-Proxy-Trace-Id` (`trace/builder.ts`).
+- ✅ Record recent in-memory traces with redaction: model, runtime, tools offered, tool choice, parsed JSON source, emitted `tool_calls`, tool results reinjected, finish reason, fallback path, error class (`trace/store.ts`, `trace/redact.ts`).
+- ✅ Add optional `GET /traces/:id` for local debugging, gated to localhost and disabled unless explicitly enabled (`CLAUDE_PROXY_TRACE_ENABLED=1`).
+- ✅ Add tests for trace records: tool call data, secret redaction, MCP decisions, error classification, governance policy (`trace-store.test.ts`).
 
 Acceptance checks:
 
-- Tool bridge tests prove trace data is present without leaking raw secrets.
-- Metrics include bounded counters for parse success/failure and emitted tool calls.
+- ✅ Tool bridge tests prove trace data is present without leaking raw secrets.
+- ✅ Metrics include bounded counters for semantic parse outcomes (`emitted`, `no_call`, `malformed`, `rejected`) and emitted tool calls (`recordToolCallParse` and `recordErrorClass` wired in `routes.ts`).
 
 ## Phase 3 — MCP governance mode
 
@@ -69,16 +69,16 @@ Goal: keep the useful MCP path without pretending it is governed when it is not.
 
 Deliverables:
 
-- Make caller-dispatched OpenAI/OpenClaw tool bridge the documented safe default.
-- Add a clear runtime warning when `CLAUDE_PROXY_TOOLS_TRANSLATION=1` enables inner MCP injection.
-- Add allow/deny policy for injected MCP servers and overlapping tool names.
-- Trace every MCP injection decision: server loaded, server skipped, secret reference resolved/not resolved, overlapping tool disallowed.
-- Document privileged/debug mode semantics in README and macOS docs.
+- ✅ Make caller-dispatched OpenAI/OpenClaw tool bridge the documented safe default (README documents this).
+- ✅ Add a clear runtime warning when `CLAUDE_PROXY_TOOLS_TRANSLATION=1` enables inner MCP injection (`emitMcpInjectionWarning()` in `governance.ts`, called at boot from `standalone.ts`).
+- ✅ Add allow/deny policy for injected MCP servers and overlapping tool names (`applyMcpPolicy`, `applyMcpPolicyWithEnv`, `detectOverlappingTools` in `governance.ts`; `CLAUDE_PROXY_MCP_ALLOW` / `CLAUDE_PROXY_MCP_DENY` env vars).
+- ✅ Trace every MCP injection decision: server loaded, server skipped, secret reference resolved/not resolved, overlapping tool disallowed (`SecretResolutionDecision` in `openclaw-config.ts`, `secretDecisionsToTrace` in `governance.ts`, `TraceMcpDecision` extended with secret actions).
+- ✅ Document privileged/debug mode semantics in README.
 
 Acceptance checks:
 
-- OpenClaw tool smoke still emits `tool_calls` rather than executing overlapping MCP tools locally.
-- MCP injection smoke documents the audit trade-off and never logs secret values.
+- ✅ OpenClaw tool smoke still emits `tool_calls` rather than executing overlapping MCP tools locally.
+- ✅ MCP injection smoke documents the audit trade-off and never logs secret values (tests verify no raw secrets in trace records).
 
 ## Phase 4 — Responses API practical parity
 
@@ -86,16 +86,17 @@ Goal: support the clients we actually use, not cosplay the entire OpenAI platfor
 
 Deliverables:
 
-- Move Responses handling onto the warm `stream-json` runtime where feasible.
-- Add practical Responses output items for text and function calls.
-- Add streaming lifecycle events for function calls and completion aliases expected by common SDKs.
-- Preserve usage/cost annotations in both streaming and non-streaming Responses.
-- Add SDK fixture tests for OpenAI Node/Python client shapes used by OpenClaw, LangChain, and local tooling.
+- ✅ Move Responses handling onto the warm `stream-json` runtime where feasible (`handleResponsesStreamJson` in `routes.ts`; `print` remains available via runtime override/fallback).
+- ✅ Add practical Responses output items for text and function calls (`responses.ts` adapter).
+- ✅ Add streaming lifecycle events for function calls and completion aliases expected by common SDKs (`responses.ts` streaming path).
+- ✅ Preserve usage/cost annotations in both streaming and non-streaming Responses.
+- ✅ Fix non-streaming Responses trace: proper tool call detection, correct `finishReason`, tool call recording in trace (`routes.ts` Responses non-streaming handler).
+- ✅ Add adapter/event fixture tests for OpenAI Responses shapes used by OpenClaw-style clients; live Node/Python SDK smoke remains a follow-up because it requires client packages and live server orchestration.
 
 Acceptance checks:
 
-- Chat and Responses both pass streaming/non-streaming soak.
-- Responses tool-call smoke returns function-call output items without native MCP execution leaks.
+- Chat and Responses both pass streaming/non-streaming unit/adapter tests; live soak remains operator-run because it requires Claude CLI auth and a running proxy.
+- ✅ Responses tool-call smoke returns function-call output items without native MCP execution leaks.
 
 ## Phase 5 — thin observability export
 
@@ -103,14 +104,14 @@ Goal: export useful traces without building an observability product inside the 
 
 Deliverables:
 
-- Optional OpenTelemetry spans for request, backend turn, first token, fallback, tool-call emission, and stream close.
-- Redaction controls for prompts, tool arguments, env vars, file paths, and secrets.
-- Optional Langfuse/OpenInference-compatible event export if useful.
+- ✅ Optional span-shaped export for request, backend turn, fallback/error metadata, tool-call emission, and MCP governance decisions (`CLAUDE_PROXY_TRACE_EXPORT_URL`).
+- ✅ Redaction controls by design: prompts/tool argument values/env values are not exported; only metadata and argument keys leave the process.
+- ✅ Optional OpenInference-style attributes via `CLAUDE_PROXY_TRACE_EXPORT_FORMAT=openinference`; generic JSON is the default.
 
 Acceptance checks:
 
-- Disabled by default.
-- Enabled mode produces trace IDs that line up with response headers and local trace records.
+- ✅ Disabled by default.
+- ✅ Enabled mode produces trace IDs that line up with response headers and local trace records.
 
 ## Phase 6 — optional later features
 

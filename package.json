@@ -17,7 +17,8 @@
     "soak": "node scripts/soak.mjs",
     "soak:quick": "SOAK_CONCURRENCY=1 node scripts/soak.mjs",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "canary:stream-json": "npm run build && node scripts/canary-stream-json.mjs"
   },
   "keywords": [
     "claude",
