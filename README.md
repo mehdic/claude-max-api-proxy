@@ -89,9 +89,11 @@ Implemented in the current release:
 - Runtime override and fallback controls for debugging and incident response.
 - SSE keepalives for OpenAI-compatible clients with strict idle timeouts.
 - Claude usage/cache metadata mapped into OpenAI-ish usage fields and simulated Anthropic API-equivalent cost estimates.
-- `/health`, `/healthz/deep`, `/metrics`, `/models`, `/pricing` and `/v1` aliases where relevant.
+- `/health`, `/healthz/deep`, `/metrics`, `/models`, `/pricing`, `/traces` and `/v1` aliases where relevant.
 - Caller-dispatched OpenAI/OpenClaw tool bridge: the proxy emits OpenAI `tool_calls` and lets the caller execute tools under its own approval/audit/allowlist system.
-- Optional inner Claude MCP injection via `CLAUDE_PROXY_TOOLS_TRANSLATION=1`; useful, but privileged, because tools executed inside Claude CLI bypass OpenClaw's dispatcher.
+- Optional inner Claude MCP injection via `CLAUDE_PROXY_TOOLS_TRANSLATION=1` with allow/deny governance policy (`CLAUDE_PROXY_MCP_ALLOW`, `CLAUDE_PROXY_MCP_DENY`).
+- **Request tracing** — every request gets a stable `trace_id` returned in `X-Claude-Proxy-Trace-Id`. Optional bounded in-memory trace store (`CLAUDE_PROXY_TRACE_ENABLED=1`) with localhost-gated `GET /traces` and `GET /traces/:id` endpoints for debugging tool bridge, MCP governance decisions, error classification, and session pooling.
+- **Protocol error classification** — explicit bounded `ProtocolErrorClass` taxonomy replaces ad-hoc string matching. All errors map to one of ~15 fixed labels safe for Prometheus and trace records.
 - Model drift tests and live soak scripts.
 
 Planned work is tracked in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
@@ -167,6 +169,11 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `CLAUDE_PROXY_N8N_DETECTION_PATTERN` | `n8n.*\/webhook\/` | Optional regex (case-insensitive). Matched against claude's tool input to decide when an n8n call is in flight. Override if your webhook URLs don't contain "n8n". |
 | `CLAUDE_PROXY_TOOLS_TRANSLATION` | unset (off) | `1` to register openclaw-known MCP servers with the inner claude CLI via `--mcp-config` injection. Currently registers `n8n` if `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` are set. The inner claude exposes them as `mcp__n8n__<tool>`. **Trade-off:** claude executes these tools internally — openclaw's audit / approval / per-agent allowlist do NOT see the calls. See "Tools translation modes" below. |
 | `CLAUDE_PROXY_N8N_MCP_BIN` | `/Users/mehdichaouachi/.nvm/versions/node/v24.13.1/bin/n8n-mcp` | Override the path to the `n8n-mcp` binary if not at the default nvm location. |
+| `CLAUDE_PROXY_TRACE_ENABLED` | unset (off) | `1` to enable the bounded in-memory trace store. Traces are accessible via `GET /traces` and `GET /traces/:id` (localhost-only). |
+| `CLAUDE_PROXY_TRACE_CAPACITY` | `200` | Max traces kept in memory. LRU eviction when capacity is exceeded. |
+| `CLAUDE_PROXY_TRACE_TTL_MS` | `3600000` (1 hour) | TTL per trace in milliseconds. Expired traces are evicted on access. Floor: 60,000 (1 min). |
+| `CLAUDE_PROXY_MCP_ALLOW` | unset (all) | Comma-separated list of MCP server names to allow for injection. If set, only listed servers are injected. |
+| `CLAUDE_PROXY_MCP_DENY` | unset (none) | Comma-separated list of MCP server names to deny. Takes precedence over allow. |
 
 #### Caveats
 
@@ -183,6 +190,8 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `/models`, `/v1/models` | GET | List served model ids |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat completion. Supports `stream: true` for SSE |
 | `/responses`, `/v1/responses` | POST | Minimal OpenAI Responses API compatibility. Supports string/array `input`, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and basic streaming Responses SSE events |
+| `/traces` | GET | List recent traces (summary). Localhost-only. Query: `?limit=50&offset=0`. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
+| `/traces/:id` | GET | Get full trace record by trace ID. Localhost-only. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
 
 ### Metrics
 
@@ -198,8 +207,12 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 - `claude_proxy_pool_warm_hits_total`, `_cold_spawns_total`
 - `claude_proxy_subprocess_spawn_failures_total{runtime}`
 - `claude_proxy_runtime_default{runtime}` — gauge, 0/1
+- `claude_proxy_error_class_total{class}` — errors by protocol error class (bounded taxonomy)
+- `claude_proxy_tool_call_parse_total{outcome}` — tool call parse success/failure/calls_emitted
+- `claude_proxy_trace_store_size{state}` — trace store occupancy gauge
+- `claude_proxy_trace_store_enabled` — 1 if tracing is on
 
-The `model` label is canonicalized to a fixed set; unknown ids collapse to `other`. Reasons come from a fixed allowlist. No per-request labels.
+The `model` label is canonicalized to a fixed set; unknown ids collapse to `other`. Error classes and fallback reasons come from fixed bounded allowlists. No per-request labels.
 
 ### Live soak / smoke
 
