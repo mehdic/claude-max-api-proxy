@@ -91,7 +91,7 @@ Deliverables:
 - ✅ Add streaming lifecycle events for function calls and completion aliases expected by common SDKs (`responses.ts` streaming path).
 - ✅ Preserve usage/cost annotations in both streaming and non-streaming Responses.
 - ✅ Fix non-streaming Responses trace: proper tool call detection, correct `finishReason`, tool call recording in trace (`routes.ts` Responses non-streaming handler).
-- ✅ Add adapter/event fixture tests plus live client matrix harness (`npm run sdk:matrix`) covering fetch wire compatibility, Python stdlib, and optional OpenAI Node/Python + LangChain clients when installed.
+- ✅ Add adapter/event fixture tests plus live client matrix harness (`npm run sdk:matrix`) covering fetch wire compatibility, Python stdlib, and OpenAI Node/Python + LangChain clients when installed (`npm run setup:sdk-matrix` prepares local optional deps).
 
 Acceptance checks:
 
@@ -105,7 +105,7 @@ Goal: export useful traces without building an observability product inside the 
 Deliverables:
 
 - ✅ Optional span-shaped export for request, backend turn, fallback/error metadata, tool-call emission, and MCP governance decisions (`CLAUDE_PROXY_TRACE_EXPORT_URL`).
-- ✅ Durable local SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH` for postmortems that survive process restarts.
+- ✅ Durable local SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH` for postmortems that survive process restarts, with optional retention pruning via `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS` / `_MS`.
 - ✅ Redaction controls by design: prompts/tool argument values/env values are not exported or persisted; only metadata and argument keys leave volatile memory.
 - ✅ Optional OpenInference-style attributes via `CLAUDE_PROXY_TRACE_EXPORT_FORMAT=openinference`; generic JSON is the default.
 
@@ -129,3 +129,9 @@ Only do these after the earlier phases are stable:
 - Do not expose the proxy beyond localhost without a separate auth/security review.
 - Do not make direct MCP execution the default path for OpenClaw tools.
 - Do not build a full agent orchestrator inside this project.
+
+
+## Operational follow-ups added after v1.0.5
+
+- Trace endpoint/security posture is documented in [`TRACE_SECURITY.md`](TRACE_SECURITY.md).
+- Lightweight production monitoring is available via `npm run monitor:live`; production alerting is configured with `CLAUDE_PROXY_MONITOR_ALERT_COMMAND`.

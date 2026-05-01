@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,9 @@
     "canary:stream-json": "npm run build && node scripts/canary-stream-json.mjs",
     "sdk:matrix": "node scripts/sdk-matrix.mjs",
     "verify:live": "npm run soak:quick && npm run canary:stream-json && npm run sdk:matrix && npm run failure:sim",
-    "failure:sim": "node scripts/failure-sim.mjs"
+    "failure:sim": "node scripts/failure-sim.mjs",
+    "monitor:live": "node scripts/live-monitor.mjs",
+    "setup:sdk-matrix": "npm install && python3 -m venv .venv-sdk-matrix && .venv-sdk-matrix/bin/python -m pip install --upgrade pip openai"
   },
   "keywords": [
     "claude",
@@ -47,12 +49,14 @@
   "homepage": "https://github.com/mehdic/claude-proxy#readme",
   "dependencies": {
     "express": "^4.21.2",
-    "uuid": "^11.0.5"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@langchain/core": "^1.1.42",
+    "@langchain/openai": "^1.4.5",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.7",
-    "@types/uuid": "^10.0.0",
+    "openai": "^6.35.0",
     "typescript": "^5.7.3"
   },
   "peerDependencies": {

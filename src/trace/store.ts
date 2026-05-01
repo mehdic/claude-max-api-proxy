@@ -12,7 +12,7 @@
 
 import type { TraceRecord, TraceListItem } from "./types.js";
 import { exportTrace } from "./exporter.js";
-import { persistTraceSqlite, traceSqliteEnabled } from "./sqlite.js";
+import { persistTraceSqlite, traceSqliteEnabled, traceSqliteRetentionMs } from "./sqlite.js";
 
 const DEFAULT_CAPACITY = 200;
 const DEFAULT_TTL_MS = 3_600_000; // 1 hour
@@ -84,7 +84,7 @@ export class TraceStore {
   /**
    * Stats for health/metrics endpoints.
    */
-  stats(): { enabled: boolean; size: number; capacity: number; ttlMs: number; sqlite: { enabled: boolean; pathConfigured: boolean } } {
+  stats(): { enabled: boolean; size: number; capacity: number; ttlMs: number; sqlite: { enabled: boolean; pathConfigured: boolean; retentionMs: number | null } } {
     return {
       enabled: this.enabled,
       size: this.enabled ? this.size() : 0,
@@ -93,6 +93,7 @@ export class TraceStore {
       sqlite: {
         enabled: traceSqliteEnabled(),
         pathConfigured: Boolean(process.env.CLAUDE_PROXY_TRACE_SQLITE_PATH),
+        retentionMs: traceSqliteRetentionMs(),
       },
     };
   }

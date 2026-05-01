@@ -16,7 +16,7 @@ function sqliteAvailable(): boolean {
   }
 }
 
-function trace(): TraceRecord {
+function trace(overrides: Partial<TraceRecord> = {}): TraceRecord {
   return {
     traceId: "trace_sqlite_1",
     requestId: "req_sqlite_1",
@@ -41,6 +41,7 @@ function trace(): TraceRecord {
     fallbackTriggered: false,
     mcpDecisions: [{ server: "github", action: "secret_resolved", envKey: "GITHUB_TOKEN" }],
     sessionWarmHit: false,
+    ...overrides,
   };
 }
 
@@ -57,4 +58,26 @@ test("persistTraceSqlite writes queryable durable trace rows", { skip: !sqliteAv
   const json = execFileSync("sqlite3", [db, "SELECT record_json FROM traces WHERE trace_id='trace_sqlite_1';"], { encoding: "utf8" });
   assert.match(json, /GITHUB_TOKEN/);
   assert.doesNotMatch(json, /secret-value|Bearer|sk-/i);
+});
+
+
+test("persistTraceSqlite prunes rows older than configured retention", { skip: !sqliteAvailable() }, async () => {
+  resetTraceSqliteForTests();
+  const db = join(mkdtempSync(join(tmpdir(), "claude-proxy-traces-retention-")), "traces.sqlite");
+  const prevDays = process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS;
+  const prevMs = process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS;
+  process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS = "1000";
+  delete process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS;
+  try {
+    await persistTraceSqliteSyncForTests(trace({ traceId: "old", requestId: "old", createdAt: Date.now() - 10_000, completedAt: Date.now() - 9_000 }), db);
+    await persistTraceSqliteSyncForTests(trace({ traceId: "new", requestId: "new", createdAt: Date.now(), completedAt: Date.now() }), db);
+
+    const rows = execFileSync("sqlite3", [db, "SELECT trace_id FROM traces ORDER BY trace_id;"], { encoding: "utf8" }).trim();
+    assert.equal(rows, "new");
+  } finally {
+    if (prevDays === undefined) delete process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS;
+    else process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS = prevDays;
+    if (prevMs === undefined) delete process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS;
+    else process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS = prevMs;
+  }
 });
