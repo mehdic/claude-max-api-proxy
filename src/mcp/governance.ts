@@ -17,9 +17,9 @@
  */
 
 import type { TraceMcpDecision } from "../trace/types.js";
-import type { ResolvedMcpServer } from "./openclaw-config.js";
+import type { ResolvedMcpServer, SecretResolutionDecision } from "./openclaw-config.js";
 
-function parseList(envVar: string | undefined): Set<string> | null {
+export function parseList(envVar: string | undefined): Set<string> | null {
   if (!envVar) return null;
   const items = envVar.split(",").map((s) => s.trim()).filter(Boolean);
   return items.length > 0 ? new Set(items) : null;
@@ -102,6 +102,61 @@ export function detectOverlappingTools(
  */
 export function isMcpInjectionEnabled(): boolean {
   return process.env.CLAUDE_PROXY_TOOLS_TRANSLATION === "1";
+}
+
+/**
+ * Apply allow/deny policy with explicit allow/deny sets (for testing).
+ * Production callers use applyMcpPolicy() which reads from env at module load.
+ */
+export function applyMcpPolicyWithEnv(
+  servers: Record<string, ResolvedMcpServer>,
+  allow: Set<string> | null,
+  deny: Set<string> | null,
+): { allowed: Record<string, ResolvedMcpServer>; decisions: TraceMcpDecision[] } {
+  const allowed: Record<string, ResolvedMcpServer> = {};
+  const decisions: TraceMcpDecision[] = [];
+
+  for (const [name, server] of Object.entries(servers)) {
+    if (deny?.has(name)) {
+      decisions.push({ server: name, action: "denied_by_policy", reason: "CLAUDE_PROXY_MCP_DENY" });
+      continue;
+    }
+    if (allow && !allow.has(name)) {
+      decisions.push({ server: name, action: "skipped", reason: "not in CLAUDE_PROXY_MCP_ALLOW" });
+      continue;
+    }
+    allowed[name] = server;
+    decisions.push({ server: name, action: "loaded" });
+  }
+
+  return { allowed, decisions };
+}
+
+/**
+ * Convert secret resolution decisions to TraceMcpDecision records.
+ */
+export function secretDecisionsToTrace(decisions: SecretResolutionDecision[]): TraceMcpDecision[] {
+  return decisions.map((d) => ({
+    server: d.server,
+    action: d.action,
+    reason: d.reason,
+    envKey: d.envKey,
+  }));
+}
+
+/**
+ * Emit a startup warning to stderr when MCP injection is enabled.
+ * Called once at server boot.
+ */
+export function emitMcpInjectionWarning(): void {
+  if (!isMcpInjectionEnabled()) return;
+  const summary = mcpGovernanceSummary();
+  console.warn(
+    `[MCP_GOVERNANCE] ⚠ MCP injection enabled (CLAUDE_PROXY_TOOLS_TRANSLATION=1). ` +
+    `Claude will execute injected MCP tools locally — openclaw's audit/approval path will NOT see those calls. ` +
+    `Allow policy: ${summary.allowPolicy ? summary.allowPolicy.join(",") : "open (all servers)"}. ` +
+    `Deny policy: ${summary.denyPolicy ? summary.denyPolicy.join(",") : "none"}.`,
+  );
 }
 
 /**

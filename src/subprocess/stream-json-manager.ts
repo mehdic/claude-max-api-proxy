@@ -31,8 +31,8 @@ import type {
 import type { SubprocessSnapshot } from "../server/watchdog.js";
 import { isAssistantMessage, isResultMessage, isContentDelta } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
-import { loadOpenclawMcpServers, type ResolvedMcpServer } from "../mcp/openclaw-config.js";
-import { applyMcpPolicy } from "../mcp/governance.js";
+import { getSecretResolutionDecisions, loadOpenclawMcpServers, type ResolvedMcpServer } from "../mcp/openclaw-config.js";
+import { applyMcpPolicy, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { TraceMcpDecision } from "../trace/types.js";
 
 const INIT_TIMEOUT_MS = 30000;
@@ -80,10 +80,11 @@ function buildOptionAMcpServers(): Record<string, ResolvedMcpServer> {
 
   // Apply allow/deny governance policy
   const { allowed, decisions } = applyMcpPolicy(raw);
-  lastMcpDecisions = decisions;
+  const secretDecisions = secretDecisionsToTrace(getSecretResolutionDecisions());
+  lastMcpDecisions = [...secretDecisions, ...decisions];
 
-  if (decisions.some((d) => d.action !== "loaded")) {
-    console.error(`[MCP governance] ${decisions.filter((d) => d.action !== "loaded").map((d) => `${d.server}:${d.action}`).join(", ")}`);
+  if (lastMcpDecisions.some((d) => d.action !== "loaded" && d.action !== "secret_resolved")) {
+    console.error(`[MCP governance] ${lastMcpDecisions.filter((d) => d.action !== "loaded" && d.action !== "secret_resolved").map((d) => `${d.server}:${d.action}`).join(", ")}`);
   }
 
   return allowed;
