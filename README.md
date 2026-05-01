@@ -4,6 +4,8 @@
 
 This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` or minimal `responses` format — [openclaw](https://github.com/openclaw/openclaw), Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
 
+Current release: **v1.0.4**. The production path is the persistent `stream-json` runtime with pre-initialized workers, session pooling, SSE keepalives, usage/cost reporting, caller-dispatched OpenAI/OpenClaw tool calls, optional MCP injection, minimal Responses compatibility, model-drift tests, and live soak coverage.
+
 > **Tested with openclaw `2026.4.24`** as a drop-in `openai-completions` provider. Multi-turn cache hits, streaming, and the SSE keepalive have all been verified against live openclaw traffic on this version. See [openclaw integration](#openclaw) below for the exact provider config.
 
 ## Why this exists
@@ -34,7 +36,7 @@ Anthropic API
        converted back to OpenAI format → your tool
 ```
 
-The proxy itself is **stateless**: it does not store prompts, conversation history, or API keys. All state lives either in the calling client (which sends the full message array each turn) or in the live `claude` subprocess.
+The proxy itself does **not** store prompts, conversation history, OAuth tokens, or API keys. In `stream-json` mode it may keep a live Claude subprocess warm for a bounded session-pool window so follow-up turns can benefit from Claude's prompt cache; durable conversation history still belongs to the caller, which sends the OpenAI `messages` array each turn.
 
 ## Prerequisites
 
@@ -75,6 +77,24 @@ curl -s -X POST http://127.0.0.1:3456/chat/completions \
 ```
 
 > Chat routes are mounted at both `/chat/completions` and `/v1/chat/completions`; Responses routes are mounted at both `/responses` and `/v1/responses` for compatibility with clients that prepend `/v1` themselves and ones that don't.
+
+## Current implementation
+
+Implemented in the current release:
+
+- OpenAI-compatible Chat Completions with streaming/non-streaming support.
+- Minimal OpenAI Responses API with string/array input, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and basic streaming events.
+- Persistent `stream-json` Claude runtime by default, plus `--print` fallback mode.
+- Init-pool and session-pool for lower cold/warm latency and better prompt-cache behavior.
+- Runtime override and fallback controls for debugging and incident response.
+- SSE keepalives for OpenAI-compatible clients with strict idle timeouts.
+- Claude usage/cache metadata mapped into OpenAI-ish usage fields and simulated Anthropic API-equivalent cost estimates.
+- `/health`, `/healthz/deep`, `/metrics`, `/models`, `/pricing` and `/v1` aliases where relevant.
+- Caller-dispatched OpenAI/OpenClaw tool bridge: the proxy emits OpenAI `tool_calls` and lets the caller execute tools under its own approval/audit/allowlist system.
+- Optional inner Claude MCP injection via `CLAUDE_PROXY_TOOLS_TRANSLATION=1`; useful, but privileged, because tools executed inside Claude CLI bypass OpenClaw's dispatcher.
+- Model drift tests and live soak scripts.
+
+Planned work is tracked in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
 ## Available models
 
@@ -540,6 +560,21 @@ src/
 │   └── standalone.ts          # entry point + boot-time pre-warm
 └── types/                     # OpenAI + Claude CLI type definitions
 ```
+
+## Next features / plan
+
+The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
+
+Recommended next work, in order:
+
+1. **Stream-json hardening** — fixture tests for malformed/partial/interleaved Claude events, protocol error classes, canary checks after Claude CLI updates, and better fallback metrics.
+2. **Tool trace/replay** — request trace IDs, redacted recent traces, parse source, emitted `tool_calls`, tool-result reinjection, fallback path, and error class.
+3. **MCP governance mode** — keep caller-dispatched OpenAI/OpenClaw tools as the safe default; treat inner MCP injection as privileged/debug mode with explicit policy, warnings, and trace records.
+4. **Responses practical parity** — bring Responses onto the warm `stream-json` path where feasible and add client-needed streaming/tool-call lifecycle events.
+5. **Thin observability export** — optional OpenTelemetry/Langfuse-style spans with redaction, disabled by default.
+6. **Later, only if useful** — context compression on session eviction, artifact/file output endpoints, semantic cache, or cross-provider routing.
+
+Deprioritized: building a full router, workflow engine, or generic MCP platform inside this repo. That is how a proxy becomes a haunted appliance with a changelog.
 
 ## Limits and known issues
 

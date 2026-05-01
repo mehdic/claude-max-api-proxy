@@ -18,7 +18,7 @@ import {
   resultUsageToOpenAI,
 } from "../adapter/cli-to-openai.js";
 import { parseToolCalls, shouldBridgeExternalTools } from "../adapter/tools.js";
-import type { OpenAIChatRequest, ResponsesRequest } from "../types/openai.js";
+import type { OpenAIChatRequest, OpenAIChatChunk, ResponsesRequest } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
 import { attachN8nDetector } from "../n8n/detector.js";
 import { n8nProgressEnabled, getRunningExecution, formatProgress } from "../n8n/progress.js";
@@ -27,6 +27,8 @@ import { poolStats } from "../subprocess/session-pool.js";
 import { recordRequest, recordSpawnFailure, recordTokenUsage } from "./metrics.js";
 import { pricingSnapshot } from "./pricing.js";
 import { annotateClaudeUsage, modelFromResult, usageFromClaudeResult } from "./usage.js";
+import { UPSTREAM_SOFT_DEAD_MS, shouldTriggerSoftDead, buildSoftDeadDiagnostic, sampleDescendants } from "./watchdog.js";
+import type { DescendantInfo } from "./watchdog.js";
 import {
   responsesToChatRequest,
   chatResponseToResponses,
@@ -35,40 +37,50 @@ import {
   buildTextDeltaEvent,
   buildStreamDoneEvents,
 } from "../adapter/responses.js";
+import { classifyError, isStreamLayerFault } from "../errors.js";
+import { createTraceBuilder, type TraceBuilder } from "../trace/builder.js";
+import { traceStore } from "../trace/store.js";
+import { mcpGovernanceSummary } from "../mcp/governance.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
+
+/**
+ * Non-rendering but non-empty assistant content.
+ * OpenClaw's OpenAI-compatible stream adapter only yields activity when it
+ * sees countable deltas such as `delta.content` or tool-call deltas. SSE
+ * comments, role-only deltas, empty strings, and `delta: {}` do not reset its
+ * LLM idle timer.
+ */
+export const HEARTBEAT_CONTENT = "\u200B";
+
+export function createHeartbeatChunk(
+  requestId: string,
+  model: string,
+  includeRole: boolean = false,
+  content: string = HEARTBEAT_CONTENT,
+): OpenAIChatChunk {
+  const heartbeatContent = content.length > 0 ? content : HEARTBEAT_CONTENT;
+  return {
+    id: `chatcmpl-${requestId}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      delta: {
+        ...(includeRole ? { role: "assistant" as const } : {}),
+        content: heartbeatContent,
+      },
+      finish_reason: null,
+    }],
+  };
+}
 
 // Counters for /metrics. Keep cardinality fixed.
 export const fallbackCounters = {
   total: 0,
   byReason: {} as Record<string, number>,
 };
-
-/**
- * Decide whether a thrown error looks like a stream-layer fault (worth
- * retrying via --print) vs a real model-layer error (rate limit, auth,
- * content policy — should surface to the client).
- *
- * Stream-layer faults bubble up as thrown exceptions from acquireSession,
- * StreamJsonSubprocess.start, or submitTurn. Model-layer errors come back
- * inside the `result` event with is_error=true and are surfaced through the
- * normal response shape — they do NOT throw, so they don't reach this guard.
- */
-function isStreamLayerFault(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  // Allowlist of patterns we trust to be transport faults.
-  return (
-    msg.includes("subprocess closed before result")
-    || msg.includes("init handshake timed out")
-    || msg.includes("subprocess not initialized")
-    || msg.includes("subprocess is dead")
-    || msg.includes("stdin not writable")
-    || msg.includes("claude cli not found")
-    || msg.includes("turn timed out")
-    || msg.includes("control error")
-  );
-}
 
 /**
  * Reduce arbitrary client-provided model strings to one of a fixed set of
@@ -87,17 +99,14 @@ function canonicalizeModelLabel(model: string | undefined): string {
   return KNOWN_MODEL_LABELS.has(stripped) ? stripped : "other";
 }
 
-function classifyFallbackReason(err: unknown): string {
-  if (!(err instanceof Error)) return "unknown";
-  const msg = err.message.toLowerCase();
-  if (msg.includes("init handshake")) return "init_handshake_timeout";
-  if (msg.includes("subprocess closed before result")) return "worker_died";
-  if (msg.includes("turn timed out")) return "turn_timeout";
-  if (msg.includes("claude cli not found")) return "spawn_enoent";
-  if (msg.includes("stdin not writable")) return "stdin_closed";
-  if (msg.includes("subprocess not initialized") || msg.includes("subprocess is dead")) return "worker_invalid";
-  if (msg.includes("control error")) return "control_protocol";
-  return "other_stream_fault";
+/**
+ * Set the trace ID header on a response. Works for both streaming (before
+ * flushHeaders) and non-streaming responses.
+ */
+function setTraceHeader(res: Response, traceId: string): void {
+  if (!res.headersSent) {
+    res.setHeader("X-Claude-Proxy-Trace-Id", traceId);
+  }
 }
 
 /**
@@ -110,10 +119,22 @@ export async function handleChatCompletions(
   res: Response
 ): Promise<void> {
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
+  const traceId = `trc_${requestId}`;
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
   const reqStart = Date.now();
   let usedRuntime: "stream-json" | "print" = "stream-json";
+
+  const tb = createTraceBuilder({
+    traceId,
+    requestId,
+    model: extractModel(body.model),
+    requestedModel: body.model || "unknown",
+    stream,
+    endpoint: "chat.completions",
+  });
+  tb.setMessageCount(body.messages?.length || 0);
+
   // Attempt to record metrics on response close, regardless of branch taken.
   res.on("close", () => {
     const status: "ok" | "error" = res.statusCode >= 400 ? "error" : "ok";
@@ -124,6 +145,8 @@ export async function handleChatCompletions(
   try {
     // Validate request
     if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+      tb.setError("invalid_request", "messages is required and must be a non-empty array");
+      tb.commit();
       res.status(400).json({
         error: {
           message: "messages is required and must be a non-empty array",
@@ -136,32 +159,36 @@ export async function handleChatCompletions(
 
     const runtime = resolveRuntime(req);
     usedRuntime = runtime;
+    tb.setRuntime(runtime);
     if (process.env.DEBUG) console.error(`[runtime] resolved=${runtime} req_id=${requestId}`);
 
     if (runtime === "stream-json") {
       const model = extractModel(body.model);
       try {
-        await handleStreamJsonRequest(req, res, model, body, requestId, stream);
+        await handleStreamJsonRequest(req, res, model, body, requestId, stream, tb);
         return;
       } catch (err) {
+        const errClass = classifyError(err);
         // Auto-fallback: only fires when CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE=1,
         // the failure is a recognized stream-layer fault, AND no SSE bytes
-        // have been committed to the client yet. Drops through to the --print
-        // path below. One retry max — the print path doesn't auto-fall-back.
+        // have been committed to the client yet.
         if (
           FALLBACK_ENABLED
           && !res.headersSent
           && !res.writableEnded
           && isStreamLayerFault(err)
         ) {
-          fallbackCounters.byReason[classifyFallbackReason(err)] =
-            (fallbackCounters.byReason[classifyFallbackReason(err)] || 0) + 1;
+          fallbackCounters.byReason[errClass] =
+            (fallbackCounters.byReason[errClass] || 0) + 1;
           fallbackCounters.total++;
+          tb.setFallback(errClass);
           console.warn(
-            `[stream_fallback] reason=${classifyFallbackReason(err)} req_id=${requestId} err="${(err as Error).message}"`,
+            `[stream_fallback] reason=${errClass} req_id=${requestId} err="${(err as Error).message}"`,
           );
           // fall through to --print path below
         } else {
+          tb.setError(errClass, (err as Error).message);
+          tb.commit();
           throw err;
         }
       }
@@ -169,19 +196,26 @@ export async function handleChatCompletions(
 
     // --print path (default fallback / runtime override / fallback retry)
     usedRuntime = "print";
+    tb.setRuntime("print");
+    setTraceHeader(res, traceId);
     const cliInput = openaiToCli(body);
     let subprocess: ClaudeSubprocess;
     try {
       subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
     } catch (err) {
       recordSpawnFailure("print");
+      tb.setError(classifyError(err), (err as Error).message);
+      tb.commit();
       throw err;
     }
 
+    const bridgeTools = shouldBridgeExternalTools(body);
+    tb.setBridgeTools(bridgeTools, body);
+
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, body.stream_options?.include_usage === true, body);
+      await handleStreamingResponse(req, res, subprocess, cliInput, requestId, body.stream_options?.include_usage === true, body, tb);
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, body);
+      await handleNonStreamingResponse(res, subprocess, cliInput, requestId, body, tb);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -214,12 +248,14 @@ async function handleStreamingResponse(
   requestId: string,
   includeUsage: boolean,
   body: OpenAIChatRequest,
+  tb: TraceBuilder,
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Request-Id", requestId);
+  setTraceHeader(res, tb.traceId);
 
   // CRITICAL: Flush headers immediately to establish SSE connection
   // Without this, headers are buffered and client times out waiting
@@ -282,6 +318,13 @@ async function handleStreamingResponse(
         annotateAndRecordUsage(result, cliInput.model);
         const rawText = result.result || bufferedText;
         const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+        const finishReason = parsed.toolCalls.length > 0 ? "tool_calls" as const : "stop" as const;
+        tb.setFinishReason(finishReason);
+        tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
+        for (const tc of parsed.toolCalls) tb.addToolCall(tc);
+        recordUsageOnTrace(tb, result);
+        tb.commit();
+
         if (parsed.toolCalls.length > 0) {
           for (const chunk of createToolCallChunks(requestId, lastModel, parsed.toolCalls)) {
             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -309,6 +352,8 @@ async function handleStreamingResponse(
 
     subprocess.on("error", (error: Error) => {
       console.error("[Streaming] Error:", error.message);
+      tb.setError(classifyError(error), error.message);
+      tb.commit();
       if (!res.writableEnded) {
         res.write(
           `data: ${JSON.stringify({
@@ -354,6 +399,7 @@ async function handleNonStreamingResponse(
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string,
   body: OpenAIChatRequest,
+  tb: TraceBuilder,
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
@@ -364,6 +410,8 @@ async function handleNonStreamingResponse(
 
     subprocess.on("error", (error: Error) => {
       console.error("[NonStreaming] Error:", error.message);
+      tb.setError(classifyError(error), error.message);
+      tb.commit();
       res.status(500).json({
         error: {
           message: error.message,
@@ -378,8 +426,18 @@ async function handleNonStreamingResponse(
       if (finalResult) {
         annotateAndRecordUsage(finalResult, cliInput.model);
         setUsageHeaders(res, finalResult);
-        res.json(cliResultToOpenai(finalResult, requestId, body));
+        const response = cliResultToOpenai(finalResult, requestId, body);
+        const finishReason = response.choices[0]?.finish_reason || "stop";
+        tb.setFinishReason(finishReason as "stop" | "tool_calls");
+        if (response.choices[0]?.message.tool_calls) {
+          for (const tc of response.choices[0].message.tool_calls) tb.addToolCall(tc);
+        }
+        recordUsageOnTrace(tb, finalResult);
+        tb.commit();
+        res.json(response);
       } else if (!res.headersSent) {
+        tb.setError("worker_died", `Claude CLI exited with code ${code} without response`);
+        tb.commit();
         res.status(500).json({
           error: {
             message: `Claude CLI exited with code ${code} without response`,
@@ -396,6 +454,8 @@ async function handleNonStreamingResponse(
       subprocess.submit(cliInput.prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      tb.setError(classifyError(error), message);
+      tb.commit();
       res.status(500).json({
         error: { message, type: "server_error", code: null },
       });
@@ -416,9 +476,14 @@ async function handleStreamJsonRequest(
   body: OpenAIChatRequest,
   requestId: string,
   stream: boolean,
+  tb: TraceBuilder,
 ): Promise<void> {
   const acquired = await acquireSession(model, body.messages);
   const subprocess = acquired.subprocess;
+  tb.setSessionWarmHit(acquired.isWarm);
+
+  const bridgeTools = shouldBridgeExternalTools(body);
+  tb.setBridgeTools(bridgeTools, body);
 
   // For warm path, send only the new user message; for cold, send the full
   // flattened conversation as one user message.
@@ -429,89 +494,49 @@ async function handleStreamJsonRequest(
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Request-Id", requestId);
+    setTraceHeader(res, tb.traceId);
     res.flushHeaders();
     res.write(":ok\n\n");
+  } else {
+    setTraceHeader(res, tb.traceId);
   }
 
   let isFirst = true;
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
-  const bridgeTools = shouldBridgeExternalTools(body);
   let done = false;
-  let lastActivityAt = Date.now();
+  let keepaliveCount = 0;
+  const requestStartAt = Date.now();
+  let lastClaudeActivityAt = Date.now();
+  let lastClientActivityAt = Date.now();
+  console.error(`[StreamJson] request start req_id=${requestId} trace_id=${tb.traceId} model=${model} runtime=stream-json stream=${stream} bridgeTools=${bridgeTools}`);
 
   // -------------------- Keepalive ---------------------
-  //
-  // openclaw aborts an LLM request when its stream iterator goes
-  // `agents.defaults.llm.idleTimeoutSeconds` (default 120s) without yielding.
-  // We have to keep that iterator yielding ANY chunk during long claude
-  // turns (cold init, deep thinking, tool use, etc.).
-  //
-  // Three layers, defense-in-depth:
-  //
-  // 1. Eager handshake — emit a `delta: { role: "assistant" }` chunk the
-  //    instant we open the SSE stream, before claude has done anything.
-  //    openclaw's iterator yields immediately, idle timer starts already
-  //    reset. Eliminates the cold-start race entirely.
-  //
-  // 2. Activity-bound tracker — `lastActivityAt` is bumped on EVERY claude
-  //    event (system init, hooks, message_start, content_block_start,
-  //    content_block_delta, message_delta, message_stop). claude is rarely
-  //    truly silent — if it's running a tool or thinking, those events
-  //    fire and count as activity even when no user-visible text is
-  //    generated.
-  //
-  // 3. Periodic synthetic keepalive — every 5s we check if 10s have passed
-  //    since the last activity. If yes, emit a `delta: { content: "​" }`
-  //    chunk. Zero-width space: 1 character that openclaw definitely
-  //    counts as content (so its client doesn't filter it as empty), but
-  //    that no UI renders. Fires repeatedly for the entire request — works
-  //    fine even for multi-minute claude turns.
   const KEEPALIVE_GAP_MS = 10_000;
   const KEEPALIVE_CHECK_MS = 5_000;
-  const ZWSP = "​"; // zero-width space — counts as content, renders nothing
 
-  // Optional n8n awareness: if a) the proxy is configured with n8n credentials
-  // and b) we just observed claude invoke a tool that calls an n8n webhook,
-  // the keepalive payload is enriched with a real progress line instead of
-  // ZWSP. No-op when env vars unset.
   const n8nDetector = attachN8nDetector(subprocess);
-  // Track when we last reported a particular execution so we don't repeat
-  // the exact same line on every keepalive fire.
   let lastReportedExecution = "";
 
   const writeKeepaliveChunk = async () => {
     if (res.writableEnded) return;
-    let content: string | undefined = bridgeTools ? undefined : ZWSP;
-    if (!bridgeTools && n8nProgressEnabled() && n8nDetector.isInFlight()) {
+    let content = HEARTBEAT_CONTENT;
+    if (n8nProgressEnabled() && n8nDetector.isInFlight()) {
       const snap = await getRunningExecution();
       if (snap) {
         const line = formatProgress(snap);
-        // First report or a different execution → emit visibly.
-        // Same execution again → emit ZWSP (still resets idle timer).
         if (snap.executionId !== lastReportedExecution) {
           content = line + " ";
           lastReportedExecution = snap.executionId;
         }
       }
     }
-    const delta = bridgeTools
-      ? (isFirst ? { role: "assistant" as const } : {})
-      : (isFirst ? { role: "assistant" as const, content } : { content });
-    const chunk = {
-      id: `chatcmpl-${requestId}`,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: lastModel,
-      choices: [{
-        index: 0,
-        delta,
-        finish_reason: null,
-      }],
-    };
+    const chunk = createHeartbeatChunk(requestId, lastModel, isFirst, content);
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     isFirst = false;
-    lastActivityAt = Date.now();
+    keepaliveCount++;
+    lastClientActivityAt = Date.now();
+    console.error(`[StreamJson] keepalive req_id=${requestId} count=${keepaliveCount} bridgeTools=${bridgeTools} contentBytes=${Buffer.byteLength(content, "utf8")}`);
   };
 
   // Layer 1: eager handshake, fires before claude starts.
@@ -525,12 +550,12 @@ async function handleStreamJsonRequest(
     };
     res.write(`data: ${JSON.stringify(handshake)}\n\n`);
     isFirst = false;
-    lastActivityAt = Date.now();
+    void writeKeepaliveChunk();
   }
 
-  // Layer 2: bump activity on ANY claude event, not just content_delta.
+  // Layer 2: track ANY claude event for observability only.
   const onAnyClaudeEvent = () => {
-    lastActivityAt = Date.now();
+    lastClaudeActivityAt = Date.now();
   };
   subprocess.on("message", onAnyClaudeEvent);
 
@@ -538,8 +563,7 @@ async function handleStreamJsonRequest(
   const keepaliveTimer = stream
     ? setInterval(() => {
         if (done || res.writableEnded) return;
-        if (Date.now() - lastActivityAt >= KEEPALIVE_GAP_MS) {
-          // Fire-and-forget — n8n fetch is short-timeout and best-effort.
+        if (Date.now() - lastClientActivityAt >= KEEPALIVE_GAP_MS) {
           void writeKeepaliveChunk();
         }
       }, KEEPALIVE_CHECK_MS)
@@ -548,11 +572,62 @@ async function handleStreamJsonRequest(
     if (keepaliveTimer) clearInterval(keepaliveTimer);
   };
 
+  // -------------------- Upstream Soft-Dead Watchdog ---------------------
+  const WATCHDOG_CHECK_MS = 30_000;
+  let watchdogFired = false;
+  const watchdogTimer = setInterval(() => {
+    if (done || watchdogFired) return;
+    const snap = subprocess.snapshot();
+
+    let descendants: DescendantInfo | null = null;
+    const now = Date.now();
+    const silenceMs = now - lastClaudeActivityAt;
+    if (silenceMs >= UPSTREAM_SOFT_DEAD_MS && snap.pid) {
+      descendants = sampleDescendants(snap.pid);
+    }
+
+    if (!shouldTriggerSoftDead(lastClaudeActivityAt, snap, now, descendants)) return;
+
+    watchdogFired = true;
+    done = true;
+    const diag = buildSoftDeadDiagnostic(requestId, lastClaudeActivityAt, snap, now, {
+      model,
+      runtime: "stream-json",
+      stream,
+      bridgeTools,
+      lastClientActivityAgeMs: now - lastClientActivityAt,
+      lastClaudeActivityAgeMs: now - lastClaudeActivityAt,
+      childPid: snap.pid,
+      processActivityCount: snap.processActivityCount,
+      watchdogAction: "kill",
+      descendantCount: descendants?.count,
+      descendantCpuPct: descendants?.totalCpuPct,
+    });
+    console.error(`[StreamJson] WATCHDOG ${diag.reason} req_id=${requestId} model=${model} stream=${stream} bridgeTools=${bridgeTools} silenceMs=${diag.silenceMs} lastClientAgeMs=${diag.context?.lastClientActivityAgeMs} lastClaudeAgeMs=${diag.context?.lastClaudeActivityAgeMs} pid=${snap.pid} processActivityCount=${snap.processActivityCount} descendants=${descendants ? `count=${descendants.count},running=${descendants.running},cpu=${descendants.totalCpuPct}%` : "none"} action=kill+discard`);
+
+    tb.setError("upstream_soft_dead", `upstream ${diag.reason}: silent for ${Math.round(diag.silenceMs / 1000)}s`);
+    tb.commit();
+
+    subprocess.kill();
+    discardSession(subprocess);
+
+    if (stream && !res.writableEnded) {
+      const errMsg = `upstream ${diag.reason}: Claude CLI silent for ${Math.round(diag.silenceMs / 1000)}s`;
+      res.write(`data: ${JSON.stringify({ error: { message: errMsg, type: "server_error", code: "upstream_dead" } })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      const errMsg = `upstream ${diag.reason}: Claude CLI silent for ${Math.round(diag.silenceMs / 1000)}s`;
+      res.status(504).json({ error: { message: errMsg, type: "server_error", code: "upstream_dead" } });
+    }
+  }, WATCHDOG_CHECK_MS);
+  const stopWatchdog = () => clearInterval(watchdogTimer);
+
   const onContentDelta = (event: ClaudeCliStreamEvent) => {
     const text = event.event.delta?.text || "";
     if (!text) return;
     assistantText += text;
-    lastActivityAt = Date.now();
+    lastClaudeActivityAt = Date.now();
     if (bridgeTools) return;
     if (stream && !res.writableEnded) {
       const chunk = {
@@ -568,6 +643,7 @@ async function handleStreamJsonRequest(
       };
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
       isFirst = false;
+      lastClientActivityAt = Date.now();
     }
   };
 
@@ -582,7 +658,7 @@ async function handleStreamJsonRequest(
 
   res.on("close", () => {
     if (!done) {
-      console.error("[StreamJson] client disconnected pre-completion, killing subprocess");
+      console.error(`[StreamJson] client disconnected pre-completion req_id=${requestId} keepalives=${keepaliveCount} lastClientIdleMs=${Date.now() - lastClientActivityAt} lastClaudeIdleMs=${Date.now() - lastClaudeActivityAt}`);
       discardSession(subprocess);
     }
   });
@@ -590,10 +666,18 @@ async function handleStreamJsonRequest(
   try {
     const result = await subprocess.submitTurn(userText);
     done = true;
+    console.error(`[StreamJson] submit complete req_id=${requestId} keepalives=${keepaliveCount} durationMs=${Date.now() - requestStartAt}`);
     annotateAndRecordUsage(result, model);
 
     const rawText = result.result || assistantText;
     const parsed = bridgeTools ? parseToolCalls(rawText, body) : { toolCalls: [], textContent: rawText };
+
+    const finishReason = parsed.toolCalls.length > 0 ? "tool_calls" as const : "stop" as const;
+    tb.setFinishReason(finishReason);
+    tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
+    for (const tc of parsed.toolCalls) tb.addToolCall(tc);
+    recordUsageOnTrace(tb, result);
+    tb.commit();
 
     if (stream && !res.writableEnded) {
       const usage = body.stream_options?.include_usage === true ? resultUsageToOpenAI(result) : undefined;
@@ -626,10 +710,14 @@ async function handleStreamJsonRequest(
     // Re-pool the subprocess for the next turn in this conversation.
     returnSession(subprocess, model, body.messages, assistantText);
   } catch (err) {
+    // If the watchdog already fired and handled cleanup, skip duplicate work.
+    if (watchdogFired) return;
     done = true;
     discardSession(subprocess);
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[StreamJson] turn error:", message);
+    tb.setError(classifyError(err), message);
+    tb.commit();
+    console.error(`[StreamJson] turn error req_id=${requestId} keepalives=${keepaliveCount}:`, message);
     if (stream && !res.writableEnded) {
       res.write(`data: ${JSON.stringify({ error: { message, type: "server_error", code: null } })}\n\n`);
       res.end();
@@ -638,6 +726,7 @@ async function handleStreamJsonRequest(
     }
   } finally {
     stopKeepalive();
+    stopWatchdog();
     n8nDetector.detach();
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
@@ -648,6 +737,18 @@ async function handleStreamJsonRequest(
 function annotateAndRecordUsage(result: ClaudeCliResult, requestedModel: string): void {
   annotateClaudeUsage(result, requestedModel);
   recordTokenUsage(modelFromResult(result, requestedModel), usageFromClaudeResult(result), result.cost, Boolean(result.usageEstimated));
+}
+
+function recordUsageOnTrace(tb: TraceBuilder, result: ClaudeCliResult): void {
+  const inputTokens = result.usage?.input_tokens || 0;
+  const outputTokens = result.usage?.output_tokens || 0;
+  const cacheRead = result.usage?.cache_read_input_tokens || 0;
+  const cacheCreation = result.usage?.cache_creation_input_tokens || 0;
+  tb.setUsage({
+    promptTokens: inputTokens + cacheCreation + cacheRead,
+    responseTokens: outputTokens,
+    cacheReadTokens: cacheRead,
+  });
 }
 
 function setUsageHeaders(res: Response, result: ClaudeCliResult): void {
@@ -672,9 +773,20 @@ export async function handleResponses(
   res: Response,
 ): Promise<void> {
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
+  const traceId = `trc_${requestId}`;
   const body = req.body as ResponsesRequest;
   const stream = body.stream === true;
   const reqStart = Date.now();
+
+  const tb = createTraceBuilder({
+    traceId,
+    requestId,
+    model: extractModel(body.model),
+    requestedModel: body.model || "unknown",
+    stream,
+    endpoint: "responses",
+  });
+  tb.setRuntime("print");
 
   // Responses compatibility currently reuses the stable --print transport path.
   res.on("close", () => {
@@ -685,6 +797,8 @@ export async function handleResponses(
   try {
     // Validate: input is required
     if (body.input === undefined || body.input === null) {
+      tb.setError("invalid_request", "input is required");
+      tb.commit();
       res.status(400).json({
         error: {
           message: "input is required",
@@ -695,17 +809,22 @@ export async function handleResponses(
       return;
     }
 
+    setTraceHeader(res, traceId);
+
     // Translate Responses request → Chat Completions request
     const chatReq = responsesToChatRequest(body);
+    tb.setBridgeTools(shouldBridgeExternalTools(chatReq), chatReq);
 
     if (stream) {
-      await handleResponsesStreaming(req, res, chatReq, requestId, body.model);
+      await handleResponsesStreaming(req, res, chatReq, requestId, body.model, tb);
     } else {
-      await handleResponsesNonStreaming(res, chatReq, requestId);
+      await handleResponsesNonStreaming(res, chatReq, requestId, tb);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("[handleResponses] Error:", message);
+    tb.setError(classifyError(error), message);
+    tb.commit();
     if (!res.headersSent) {
       res.status(500).json({
         error: { message, type: "server_error", code: null },
@@ -722,6 +841,7 @@ async function handleResponsesNonStreaming(
   res: Response,
   chatReq: OpenAIChatRequest,
   requestId: string,
+  tb: TraceBuilder,
 ): Promise<void> {
   const cliInput = openaiToCli(chatReq);
   const subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
@@ -735,6 +855,8 @@ async function handleResponsesNonStreaming(
 
     subprocess.on("error", (error: Error) => {
       console.error("[Responses NonStreaming] Error:", error.message);
+      tb.setError(classifyError(error), error.message);
+      tb.commit();
       res.status(500).json({
         error: { message: error.message, type: "server_error", code: null },
       });
@@ -746,8 +868,13 @@ async function handleResponsesNonStreaming(
         annotateAndRecordUsage(finalResult, cliInput.model);
         const chatResponse = cliResultToOpenai(finalResult, requestId, chatReq);
         const responsesResponse = chatResponseToResponses(chatResponse, requestId);
+        tb.setFinishReason("stop");
+        recordUsageOnTrace(tb, finalResult);
+        tb.commit();
         res.json(responsesResponse);
       } else if (!res.headersSent) {
+        tb.setError("worker_died", `Claude CLI exited with code ${code} without response`);
+        tb.commit();
         res.status(500).json({
           error: {
             message: `Claude CLI exited with code ${code} without response`,
@@ -763,6 +890,8 @@ async function handleResponsesNonStreaming(
       subprocess.submit(cliInput.prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      tb.setError(classifyError(error), message);
+      tb.commit();
       res.status(500).json({
         error: { message, type: "server_error", code: null },
       });
@@ -781,6 +910,7 @@ async function handleResponsesStreaming(
   chatReq: OpenAIChatRequest,
   requestId: string,
   requestModel: string,
+  tb: TraceBuilder,
 ): Promise<void> {
   const cliInput = openaiToCli(chatReq);
   const subprocess = await acquireSubprocess(cliInput.model, cliInput.disallowedTools);
@@ -791,6 +921,7 @@ async function handleResponsesStreaming(
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Request-Id", requestId);
+  setTraceHeader(res, tb.traceId);
   res.flushHeaders();
 
   // Emit opening envelope events
@@ -833,6 +964,12 @@ async function handleResponsesStreaming(
         fullText = parsed.textContent || "";
         const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
         const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, fullText, usage, parsed.toolCalls);
+
+        tb.setFinishReason(parsed.toolCalls.length > 0 ? "tool_calls" : "stop");
+        for (const tc of parsed.toolCalls) tb.addToolCall(tc);
+        recordUsageOnTrace(tb, result);
+        tb.commit();
+
         for (const evt of doneEvents) {
           const parsed = JSON.parse(evt);
           res.write(`event: ${parsed.type}\ndata: ${evt}\n\n`);
@@ -844,6 +981,8 @@ async function handleResponsesStreaming(
 
     subprocess.on("error", (error: Error) => {
       console.error("[Responses Streaming] Error:", error.message);
+      tb.setError(classifyError(error), error.message);
+      tb.commit();
       if (!res.writableEnded) {
         res.write(`event: error\ndata: ${JSON.stringify({ error: { message: error.message, type: "server_error" } })}\n\n`);
         res.end();
@@ -865,6 +1004,8 @@ async function handleResponsesStreaming(
       subprocess.submit(cliInput.prompt);
     } catch (err) {
       console.error("[Responses Streaming] Submit error:", err);
+      tb.setError(classifyError(err), (err as Error).message);
+      tb.commit();
       if (!res.writableEnded) {
         res.write(`event: error\ndata: ${JSON.stringify({ error: { message: (err as Error).message, type: "server_error" } })}\n\n`);
         res.end();
@@ -922,6 +1063,8 @@ export function handleHealth(_req: Request, res: Response): void {
     status: "ok",
     provider: "claude-code-cli",
     timestamp: new Date().toISOString(),
+    trace: traceStore.stats(),
+    mcp: mcpGovernanceSummary(),
   });
 }
 
@@ -934,17 +1077,12 @@ let lastDeepProbeSuccessAt: number = 0;
  *
  * Real probe — spawns a `claude --print` with a trivial prompt and a 5s
  * budget. Returns 200 with latency + pool stats on success, 503 with the
- * error and the last-success timestamp on failure. Use for the LaunchAgent
- * watchdog and openclaw probes — anything that needs to know whether the
- * proxy can actually serve a request, not just that the port is bound.
+ * error and the last-success timestamp on failure.
  */
 export async function handleHealthDeep(_req: Request, res: Response): Promise<void> {
   const start = Date.now();
   try {
     const sub = new ClaudeSubprocess();
-    // Plain --print path so /healthz/deep is independent of stream-json
-    // health (intentional: a stream-json regression should not mask a
-    // working --print fallback).
     const ok = await new Promise<boolean>((resolve, reject) => {
       const PROBE_TIMEOUT_MS = 15000;
       const timer = setTimeout(() => reject(new Error(`deep probe timed out (${PROBE_TIMEOUT_MS / 1000}s)`)), PROBE_TIMEOUT_MS);
@@ -969,6 +1107,7 @@ export async function handleHealthDeep(_req: Request, res: Response): Promise<vo
       latency_ms: latencyMs,
       runtime: defaultRuntime(),
       pool: poolStats(),
+      trace: traceStore.stats(),
       last_success_ts: lastDeepProbeSuccessAt,
     });
   } catch (err) {
@@ -979,7 +1118,62 @@ export async function handleHealthDeep(_req: Request, res: Response): Promise<vo
       latency_ms: Date.now() - start,
       runtime: defaultRuntime(),
       pool: poolStats(),
+      trace: traceStore.stats(),
       last_success_ts: lastDeepProbeSuccessAt || null,
     });
   }
+}
+
+// ── Trace endpoints ─────────────────────────────────────────────────
+
+/**
+ * Localhost gate — rejects requests from non-loopback addresses.
+ */
+function isLocalhost(req: Request): boolean {
+  const ip = req.ip || req.socket?.remoteAddress || "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+/**
+ * Handle GET /traces/:id
+ *
+ * Returns a single trace record. Localhost-gated.
+ */
+export function handleTraceGet(req: Request, res: Response): void {
+  if (!isLocalhost(req)) {
+    res.status(403).json({ error: { message: "trace endpoints are localhost-only", type: "forbidden" } });
+    return;
+  }
+  if (!traceStore.enabled) {
+    res.status(404).json({ error: { message: "tracing is disabled (set CLAUDE_PROXY_TRACE_ENABLED=1)", type: "not_found" } });
+    return;
+  }
+  const traceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const trace = traceStore.get(traceId || "");
+  if (!trace) {
+    res.status(404).json({ error: { message: "trace not found", type: "not_found" } });
+    return;
+  }
+  res.json(trace);
+}
+
+/**
+ * Handle GET /traces
+ *
+ * Returns a list of recent traces (summary view). Localhost-gated.
+ * Query params: ?limit=50&offset=0
+ */
+export function handleTraceList(req: Request, res: Response): void {
+  if (!isLocalhost(req)) {
+    res.status(403).json({ error: { message: "trace endpoints are localhost-only", type: "forbidden" } });
+    return;
+  }
+  if (!traceStore.enabled) {
+    res.status(200).json({ object: "list", data: [], enabled: false, message: "tracing is disabled (set CLAUDE_PROXY_TRACE_ENABLED=1)" });
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
+  const data = traceStore.list(limit, offset);
+  res.json({ object: "list", data, total: traceStore.size(), ...traceStore.stats() });
 }
