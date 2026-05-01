@@ -92,9 +92,9 @@ Implemented in the current release:
 - `/health`, `/healthz/deep`, `/metrics`, `/models`, `/pricing`, `/traces` and `/v1` aliases where relevant.
 - Caller-dispatched OpenAI/OpenClaw tool bridge: the proxy emits OpenAI `tool_calls` and lets the caller execute tools under its own approval/audit/allowlist system.
 - Optional inner Claude MCP injection via `CLAUDE_PROXY_TOOLS_TRANSLATION=1` with allow/deny governance policy (`CLAUDE_PROXY_MCP_ALLOW`, `CLAUDE_PROXY_MCP_DENY`).
-- **Request tracing** — every request gets a stable `trace_id` returned in `X-Claude-Proxy-Trace-Id`. Optional bounded in-memory trace store (`CLAUDE_PROXY_TRACE_ENABLED=1`) with localhost-gated `GET /traces` and `GET /traces/:id` endpoints for debugging tool bridge, MCP governance decisions, error classification, and session pooling.
+- **Request tracing** — every request gets a stable `trace_id` returned in `X-Claude-Proxy-Trace-Id`. Optional bounded in-memory trace store (`CLAUDE_PROXY_TRACE_ENABLED=1`) with localhost-gated `GET /traces` and `GET /traces/:id` endpoints for debugging tool bridge, MCP governance decisions, error classification, and session pooling. Optional SQLite persistence supports retention via `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS`; see [`docs/TRACE_SECURITY.md`](docs/TRACE_SECURITY.md).
 - **Protocol error classification** — explicit bounded `ProtocolErrorClass` taxonomy replaces ad-hoc string matching. All errors map to one of ~15 fixed labels safe for Prometheus and trace records.
-- Model drift tests and live soak scripts.
+- Model drift tests, live soak scripts, SDK/client matrix, failure simulation, stream-json canary, and lightweight live monitor.
 
 Planned work is tracked in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
@@ -133,7 +133,7 @@ The fallback path is also the target of the optional `CLAUDE_PROXY_FALLBACK_ON_S
 
 Active in both modes:
 - Cache stats surfaced in `usage.prompt_tokens_details.cached_tokens` so you can see Anthropic's prompt cache fire.
-- `--exclude-dynamic-system-prompt-sections` passed to `claude` so per-machine sections don't bust the cache hash.
+- Optional `--exclude-dynamic-system-prompt-sections` support is capability-checked against `claude --help` before the proxy passes the flag, so CLI releases that remove/rename it do not break startup.
 
 ### Flipping modes
 
@@ -173,6 +173,8 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `CLAUDE_PROXY_TRACE_CAPACITY` | `200` | Max traces kept in memory. LRU eviction when capacity is exceeded. |
 | `CLAUDE_PROXY_TRACE_TTL_MS` | `3600000` (1 hour) | TTL per trace in milliseconds. Expired traces are evicted on access. Floor: 60,000 (1 min). |
 | `CLAUDE_PROXY_TRACE_SQLITE_PATH` | unset (off) | Optional durable local SQLite trace log. Stores redacted trace metadata/JSON in a `traces` table. Setting this also enables trace collection. |
+| `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS` | unset (forever) | Optional durable trace retention window in days. Old rows are pruned after completed trace inserts. |
+| `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS` | unset (forever) | Optional retention override in milliseconds; used if days is unset. |
 | `CLAUDE_PROXY_TRACE_SQLITE_DEBUG` | unset | `1` to log SQLite persistence failures. User requests never fail because durable trace persistence failed. |
 | `CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS` | unset | `1` to request Claude CLI `--exclude-dynamic-system-prompt-sections`; the proxy first checks `claude --help` and skips the flag if unsupported. |
 | `CLAUDE_PROXY_MCP_ALLOW` | unset (all) | Comma-separated list of MCP server names to allow for injection. If set, only listed servers are injected. |
@@ -195,6 +197,18 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `/responses`, `/v1/responses` | POST | Practical OpenAI Responses API compatibility. Uses the selected runtime (`stream-json` by default), supports string/array `input`, `instructions`, usage/cost annotations, caller-dispatched `function_call` output items, and streaming Responses SSE events |
 | `/traces` | GET | List recent traces (summary). Localhost-only. Query: `?limit=50&offset=0`. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
 | `/traces/:id` | GET | Get full trace record by trace ID. Localhost-only. Requires `CLAUDE_PROXY_TRACE_ENABLED=1`. |
+
+## Live monitoring
+
+`npm run monitor:live` performs a lightweight production check: `/health` plus one tiny Chat Completions request. It exits non-zero on failure. For operator alerting, set `CLAUDE_PROXY_MONITOR_ALERT_COMMAND`; the command receives the alert body on stdin and in `CLAUDE_PROXY_MONITOR_MESSAGE`. Example:
+
+```bash
+CLAUDE_PROXY_MONITOR_ALERT_COMMAND="bash ~/.openclaw/workspace/scripts/telegram-send.sh --bot cassius --chat 5216159759 --message \"$CLAUDE_PROXY_MONITOR_MESSAGE\"" \
+  npm run monitor:live
+```
+
+Other knobs: `CLAUDE_PROXY_MONITOR_BASE_URL`, `CLAUDE_PROXY_MONITOR_MODEL`, `CLAUDE_PROXY_MONITOR_TIMEOUT_MS`.
+
 
 ### Metrics
 
@@ -603,9 +617,9 @@ The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATU
 3. **MCP governance mode** — allow/deny policy (`CLAUDE_PROXY_MCP_ALLOW`/`DENY`), native Claude tool deny-list propagation for overlapping caller-dispatched tools, startup warning when MCP injection is enabled, secret resolution tracing (no secret values in traces), and structured audit decisions in trace records.
 4. **Responses API parity** — Responses now uses the same selected runtime path as chat completions where feasible (`stream-json` by default), with text/function-call output items, streaming lifecycle, usage/cost annotations, tool call detection, and trace recording.
 5. **Thin observability export** — optional redacted span-shaped trace export (`generic` or OpenInference-style attributes), disabled by default and fire-and-forget so exporter failures never affect requests.
-6. **Live client matrix** — `npm run sdk:matrix` validates fetch wire-compatibility, Python stdlib compatibility, and optional OpenAI Node/Python + LangChain clients when installed.
+6. **Live client matrix** — `npm run sdk:matrix` validates fetch wire-compatibility, Python stdlib compatibility, and OpenAI Node/Python + LangChain clients when installed. Use `npm run setup:sdk-matrix` once, then run with `SDK_MATRIX_PYTHON=.venv-sdk-matrix/bin/python`.
 7. **Failure simulation** — `npm run failure:sim` exercises invalid requests, streaming aborts, trace headers, and tool-bridge resilience against live proxy behavior; unit tests cover unsupported CLI flags, corrupt stream-json events, malformed tool JSON, and MCP-style rejected tool calls.
-8. **Durable local traces** — optional SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH`, storing redacted records for postmortems beyond process memory.
+8. **Durable local traces** — optional SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH`, storing redacted records for postmortems beyond process memory; retention is controlled by `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS` / `_MS`.
 9. **Claude CLI capability detection** — optional/version-sensitive flags are checked against `claude --help` before being passed; unsupported flags no longer break worker startup.
 
 **Remaining work:**

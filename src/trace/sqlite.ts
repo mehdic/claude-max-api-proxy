@@ -36,6 +36,16 @@ export function traceSqliteEnabled(): boolean {
   return traceSqlitePath() !== null;
 }
 
+export function traceSqliteRetentionMs(): number | null {
+  const days = Number(process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS || "");
+  if (Number.isFinite(days) && days > 0) return Math.floor(days * 24 * 60 * 60 * 1000);
+
+  const ms = Number(process.env.CLAUDE_PROXY_TRACE_SQLITE_RETENTION_MS || "");
+  if (Number.isFinite(ms) && ms > 0) return Math.floor(ms);
+
+  return null;
+}
+
 export function resetTraceSqliteForTests(): void {
   initializedPaths = new Set<string>();
 }
@@ -46,7 +56,8 @@ export function persistTraceSqlite(trace: TraceRecord): void {
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
     ensureDb(dbPath);
-    const sql = buildInsertSql(trace);
+    const sql = `${buildInsertSql(trace)}
+${buildPruneSql(Date.now())}`;
     execFile("sqlite3", [dbPath, sql], { timeout: 2_000, maxBuffer: 128_000 }, (err) => {
       if (err && process.env.CLAUDE_PROXY_TRACE_SQLITE_DEBUG === "1") {
         console.error("[trace-sqlite] persist failed", err.message || String(err));
@@ -66,7 +77,8 @@ export function persistTraceSqliteSyncForTests(trace: TraceRecord, dbPath: strin
     try {
       mkdirSync(dirname(dbPath), { recursive: true });
       ensureDb(dbPath);
-      execFile("sqlite3", [dbPath, buildInsertSql(trace)], { timeout: 2_000, maxBuffer: 128_000 }, (err) => {
+      execFile("sqlite3", [dbPath, `${buildInsertSql(trace)}
+${buildPruneSql(Date.now())}`], { timeout: 2_000, maxBuffer: 128_000 }, (err) => {
         if (prev === undefined) delete process.env.CLAUDE_PROXY_TRACE_SQLITE_PATH;
         else process.env.CLAUDE_PROXY_TRACE_SQLITE_PATH = prev;
         if (err) reject(err);
@@ -91,6 +103,13 @@ function ensureDb(dbPath: string): void {
     }
     throw err;
   }
+}
+
+function buildPruneSql(now: number): string {
+  const retentionMs = traceSqliteRetentionMs();
+  if (!retentionMs) return "";
+  const cutoff = Math.trunc(now - retentionMs);
+  return `DELETE FROM traces WHERE created_at < ${cutoff};`;
 }
 
 function buildInsertSql(trace: TraceRecord): string {
