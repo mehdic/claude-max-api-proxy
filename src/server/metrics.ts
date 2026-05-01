@@ -19,6 +19,8 @@ import { poolCounters, poolStats } from "../subprocess/session-pool.js";
 import { fallbackCounters } from "./routes.js";
 import { defaultRuntime } from "../subprocess/runtime.js";
 import type { ClaudeTokenUsageBreakdown, UsageCostEstimate } from "./pricing.js";
+import { traceStore } from "../trace/store.js";
+import type { ProtocolErrorClass } from "../errors.js";
 
 // Per-request counters maintained inline by the chat-completion handlers.
 // Recorded with a fixed label set: runtime + canonical model + status.
@@ -41,6 +43,8 @@ const requestRecords: Map<string, RequestBucket> = new Map();
 const subprocessSpawnFailures: Record<string, number> = {};
 const tokenCounters: Record<string, number> = {};
 const costCounters: Record<string, number> = {};
+const errorClassCounters: Record<string, number> = {};
+const toolCallParseCounters = { success: 0, failure: 0, total_calls: 0 };
 
 /** Call from chat handlers when a request finishes. */
 export function recordRequest(rec: RequestRecord): void {
@@ -59,6 +63,16 @@ export function recordRequest(rec: RequestRecord): void {
 
 export function recordSpawnFailure(runtime: "stream-json" | "print"): void {
   subprocessSpawnFailures[runtime] = (subprocessSpawnFailures[runtime] || 0) + 1;
+}
+
+export function recordErrorClass(cls: ProtocolErrorClass): void {
+  errorClassCounters[cls] = (errorClassCounters[cls] || 0) + 1;
+}
+
+export function recordToolCallParse(success: boolean, callCount: number): void {
+  if (success) toolCallParseCounters.success++;
+  else toolCallParseCounters.failure++;
+  toolCallParseCounters.total_calls += callCount;
 }
 
 export function recordTokenUsage(
@@ -205,6 +219,32 @@ export function renderMetrics(): string {
   lines.push(`claude_proxy_runtime_default{runtime="stream-json"} ${defaultRuntime() === "stream-json" ? 1 : 0}`);
   lines.push(`claude_proxy_runtime_default{runtime="print"} ${defaultRuntime() === "print" ? 1 : 0}`);
 
+  // claude_proxy_error_class_total — bounded error classification counters
+  lines.push("# HELP claude_proxy_error_class_total Errors by protocol error class.");
+  lines.push("# TYPE claude_proxy_error_class_total counter");
+  if (Object.keys(errorClassCounters).length === 0) {
+    lines.push(`claude_proxy_error_class_total{class="none"} 0`);
+  } else {
+    for (const [cls, n] of Object.entries(errorClassCounters)) {
+      lines.push(`claude_proxy_error_class_total{class="${escapeLabel(cls)}"} ${n}`);
+    }
+  }
+
+  // claude_proxy_tool_call_parse — tool call parse success/failure counters
+  lines.push("# HELP claude_proxy_tool_call_parse_total Tool call parse outcomes.");
+  lines.push("# TYPE claude_proxy_tool_call_parse_total counter");
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="success"} ${toolCallParseCounters.success}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="failure"} ${toolCallParseCounters.failure}`);
+  lines.push(`claude_proxy_tool_call_parse_total{outcome="calls_emitted"} ${toolCallParseCounters.total_calls}`);
+
+  // claude_proxy_trace_store — trace store gauge
+  const ts = traceStore.stats();
+  lines.push("# HELP claude_proxy_trace_store_size Current trace store occupancy.");
+  lines.push("# TYPE claude_proxy_trace_store_size gauge");
+  lines.push(`claude_proxy_trace_store_size{state="current"} ${ts.size}`);
+  lines.push(`claude_proxy_trace_store_size{state="capacity"} ${ts.capacity}`);
+  lines.push(`claude_proxy_trace_store_enabled ${ts.enabled ? 1 : 0}`);
+
   return lines.join("\n") + "\n";
 }
 
@@ -213,6 +253,10 @@ export function resetMetrics(): void {
   for (const key of Object.keys(subprocessSpawnFailures)) delete subprocessSpawnFailures[key];
   for (const key of Object.keys(tokenCounters)) delete tokenCounters[key];
   for (const key of Object.keys(costCounters)) delete costCounters[key];
+  for (const key of Object.keys(errorClassCounters)) delete errorClassCounters[key];
+  toolCallParseCounters.success = 0;
+  toolCallParseCounters.failure = 0;
+  toolCallParseCounters.total_calls = 0;
 }
 
 export function handleMetrics(_req: Request, res: Response): void {

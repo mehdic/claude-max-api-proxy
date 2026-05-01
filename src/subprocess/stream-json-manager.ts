@@ -28,12 +28,23 @@ import type {
   ClaudeCliResult,
   ClaudeCliStreamEvent,
 } from "../types/claude-cli.js";
+import type { SubprocessSnapshot } from "../server/watchdog.js";
 import { isAssistantMessage, isResultMessage, isContentDelta } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 import { loadOpenclawMcpServers, type ResolvedMcpServer } from "../mcp/openclaw-config.js";
+import { applyMcpPolicy } from "../mcp/governance.js";
+import type { TraceMcpDecision } from "../trace/types.js";
 
 const INIT_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 900000;
+
+/** MCP governance decisions from the last buildOptionAMcpServers() call. */
+let lastMcpDecisions: TraceMcpDecision[] = [];
+
+/** Retrieve the MCP governance decisions from the most recent spawn. */
+export function getLastMcpDecisions(): TraceMcpDecision[] {
+  return lastMcpDecisions;
+}
 
 /**
  * Option A MCP-server registry for `--mcp-config` injection.
@@ -44,20 +55,18 @@ const TURN_TIMEOUT_MS = 900000;
  *
  * Sources, in priority order (later overrides earlier on name conflict):
  *   1. openclaw.json's `mcp.servers` section, with secret refs resolved
- *      via openclaw's own keychain resolver. This is the generic path —
- *      adding an MCP server in openclaw automatically makes it available
- *      to the inner claude. See src/mcp/openclaw-config.ts.
- *   2. Direct env vars (legacy, kept for the n8n case where the proxy
- *      already needs N8N_API_URL + N8N_API_KEY for keepalive enrichment
- *      and we don't want to require operators to also wire it in
- *      openclaw.json).
+ *      via openclaw's own keychain resolver.
+ *   2. Direct env vars (legacy, kept for the n8n case).
+ *
+ * The server set is filtered through MCP governance policy
+ * (CLAUDE_PROXY_MCP_ALLOW / CLAUDE_PROXY_MCP_DENY) before injection.
  */
 function buildOptionAMcpServers(): Record<string, ResolvedMcpServer> {
-  const out: Record<string, ResolvedMcpServer> = { ...loadOpenclawMcpServers() };
+  const raw: Record<string, ResolvedMcpServer> = { ...loadOpenclawMcpServers() };
 
   // Legacy/fallback: env-var-driven n8n, only if not already set from openclaw.json.
-  if (!out.n8n && process.env.CLAUDE_PROXY_N8N_API_URL && process.env.CLAUDE_PROXY_N8N_API_KEY) {
-    out.n8n = {
+  if (!raw.n8n && process.env.CLAUDE_PROXY_N8N_API_URL && process.env.CLAUDE_PROXY_N8N_API_KEY) {
+    raw.n8n = {
       command: process.env.CLAUDE_PROXY_N8N_MCP_BIN
         || "n8n-mcp",
       args: [],
@@ -69,7 +78,15 @@ function buildOptionAMcpServers(): Record<string, ResolvedMcpServer> {
     };
   }
 
-  return out;
+  // Apply allow/deny governance policy
+  const { allowed, decisions } = applyMcpPolicy(raw);
+  lastMcpDecisions = decisions;
+
+  if (decisions.some((d) => d.action !== "loaded")) {
+    console.error(`[MCP governance] ${decisions.filter((d) => d.action !== "loaded").map((d) => `${d.server}:${d.action}`).join(", ")}`);
+  }
+
+  return allowed;
 }
 
 export interface StreamJsonOptions {
@@ -86,6 +103,8 @@ export class StreamJsonSubprocess extends EventEmitter {
   private spawnedAt: number = 0;
   private model: ClaudeModel | null = null;
   private turnInFlight: boolean = false;
+  private lastProcessActivityAt: number = 0;
+  private processActivityCount: number = 0;
 
   /** Spawn the subprocess and complete the initialize handshake. */
   async start(options: StreamJsonOptions): Promise<void> {
@@ -110,6 +129,7 @@ export class StreamJsonSubprocess extends EventEmitter {
     // and approval do NOT see these calls. Documented trade-off; see
     // README "Tools translation modes".
     if (process.env.CLAUDE_PROXY_TOOLS_TRANSLATION === "1") {
+      console.error("[MCP] WARNING: CLAUDE_PROXY_TOOLS_TRANSLATION=1 — inner Claude CLI will execute MCP tools directly. OpenClaw audit/approval is bypassed for injected tools.");
       const mcpServers = buildOptionAMcpServers();
       if (Object.keys(mcpServers).length > 0) {
         args.push("--mcp-config", JSON.stringify({ mcpServers }));
@@ -135,11 +155,13 @@ export class StreamJsonSubprocess extends EventEmitter {
       });
 
       this.process.stdout?.on("data", (chunk: Buffer) => {
+        this.markProcessActivity();
         this.buffer += chunk.toString();
         this.processBuffer();
       });
 
       this.process.stderr?.on("data", (chunk: Buffer) => {
+        this.markProcessActivity();
         const text = chunk.toString().trim();
         if (text) console.error("[StreamJson stderr]:", text.slice(0, 200));
       });
@@ -155,6 +177,7 @@ export class StreamJsonSubprocess extends EventEmitter {
       });
 
       this.process.once("spawn", () => {
+        this.markProcessActivity();
         console.error(`[StreamJson] Spawned PID ${this.process?.pid} for ${options.model}`);
         // Send initialize handshake.
         this.sendInit().then(resolve).catch(reject);
@@ -251,10 +274,16 @@ export class StreamJsonSubprocess extends EventEmitter {
   }
 
   private writeLine(obj: unknown): void {
-    if (!this.process?.stdin || this.process.stdin.destroyed) {
+    if (!this.process?.stdin || this.process.stdin.destroyed || this.process.stdin.writableEnded) {
       throw new Error("stdin not writable");
     }
     this.process.stdin.write(JSON.stringify(obj) + "\n");
+    this.markProcessActivity();
+  }
+
+  private markProcessActivity(): void {
+    this.lastProcessActivityAt = Date.now();
+    this.processActivityCount++;
   }
 
   private processBuffer(): void {
@@ -323,5 +352,30 @@ export class StreamJsonSubprocess extends EventEmitter {
 
   getAge(): number {
     return this.spawnedAt ? Date.now() - this.spawnedAt : 0;
+  }
+
+  /**
+   * Return a safe, serializable snapshot of subprocess health for watchdog
+   * diagnostics. No secrets, no circular refs.
+   */
+  snapshot(): SubprocessSnapshot {
+    const now = Date.now();
+    return {
+      pid: this.process?.pid,
+      exitCode: this.process?.exitCode ?? null,
+      signalCode: this.process?.signalCode ?? null,
+      killed: this.isKilled,
+      stdinDestroyed: this.process?.stdin?.destroyed ?? true,
+      stdinWritableEnded: this.process?.stdin?.writableEnded ?? true,
+      stdoutReadable: this.process?.stdout?.readable ?? false,
+      stdoutDestroyed: this.process?.stdout?.destroyed ?? true,
+      stderrReadable: this.process?.stderr?.readable ?? false,
+      stderrDestroyed: this.process?.stderr?.destroyed ?? true,
+      initialized: this.initialized,
+      turnInFlight: this.turnInFlight,
+      ageMs: this.getAge(),
+      lastProcessActivityAgeMs: this.lastProcessActivityAt ? now - this.lastProcessActivityAt : null,
+      processActivityCount: this.processActivityCount,
+    };
   }
 }
