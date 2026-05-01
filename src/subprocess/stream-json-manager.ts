@@ -35,6 +35,7 @@ import { getSecretResolutionDecisions, loadOpenclawMcpServers, type ResolvedMcpS
 import { applyMcpPolicy, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { TraceMcpDecision } from "../trace/types.js";
 import { parseStreamJsonLine } from "./stream-json-parser.js";
+import { pushClaudeFlagIfSupported } from "./claude-flags.js";
 
 const INIT_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 900000;
@@ -122,11 +123,11 @@ export class StreamJsonSubprocess extends EventEmitter {
       "--no-session-persistence",
     ];
     // This Claude CLI flag has existed in some builds and disappeared in
-    // others. Keep it opt-in so a CLI update cannot break the whole persistent
-    // runtime at spawn time.
-    if (process.env.CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS === "1") {
-      args.push("--exclude-dynamic-system-prompt-sections");
-    }
+    // others. Capability-detect it before use so a CLI update cannot break the
+    // whole persistent runtime at spawn time.
+    await pushClaudeFlagIfSupported(args, "--exclude-dynamic-system-prompt-sections", {
+      requested: process.env.CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS === "1",
+    });
     if (process.env.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true") {
       args.push("--dangerously-skip-permissions");
     }

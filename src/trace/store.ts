@@ -12,6 +12,7 @@
 
 import type { TraceRecord, TraceListItem } from "./types.js";
 import { exportTrace } from "./exporter.js";
+import { persistTraceSqlite, traceSqliteEnabled } from "./sqlite.js";
 
 const DEFAULT_CAPACITY = 200;
 const DEFAULT_TTL_MS = 3_600_000; // 1 hour
@@ -23,7 +24,7 @@ export class TraceStore {
   readonly enabled: boolean;
 
   constructor() {
-    this.enabled = process.env.CLAUDE_PROXY_TRACE_ENABLED === "1";
+    this.enabled = process.env.CLAUDE_PROXY_TRACE_ENABLED === "1" || traceSqliteEnabled();
     this.capacity = Math.max(1, parseInt(process.env.CLAUDE_PROXY_TRACE_CAPACITY || "", 10) || DEFAULT_CAPACITY);
     this.ttlMs = Math.max(60_000, parseInt(process.env.CLAUDE_PROXY_TRACE_TTL_MS || "", 10) || DEFAULT_TTL_MS);
   }
@@ -44,7 +45,10 @@ export class TraceStore {
     // Move to end (most recently accessed)
     this.traces.delete(trace.traceId);
     this.traces.set(trace.traceId, trace);
-    if (trace.completedAt !== undefined) exportTrace(trace);
+    if (trace.completedAt !== undefined) {
+      exportTrace(trace);
+      persistTraceSqlite(trace);
+    }
   }
 
   /**
@@ -80,12 +84,16 @@ export class TraceStore {
   /**
    * Stats for health/metrics endpoints.
    */
-  stats(): { enabled: boolean; size: number; capacity: number; ttlMs: number } {
+  stats(): { enabled: boolean; size: number; capacity: number; ttlMs: number; sqlite: { enabled: boolean; pathConfigured: boolean } } {
     return {
       enabled: this.enabled,
       size: this.enabled ? this.size() : 0,
       capacity: this.capacity,
       ttlMs: this.ttlMs,
+      sqlite: {
+        enabled: traceSqliteEnabled(),
+        pathConfigured: Boolean(process.env.CLAUDE_PROXY_TRACE_SQLITE_PATH),
+      },
     };
   }
 

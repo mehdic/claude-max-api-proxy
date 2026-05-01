@@ -172,6 +172,9 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `CLAUDE_PROXY_TRACE_ENABLED` | unset (off) | `1` to enable the bounded in-memory trace store. Traces are accessible via `GET /traces` and `GET /traces/:id` (localhost-only). |
 | `CLAUDE_PROXY_TRACE_CAPACITY` | `200` | Max traces kept in memory. LRU eviction when capacity is exceeded. |
 | `CLAUDE_PROXY_TRACE_TTL_MS` | `3600000` (1 hour) | TTL per trace in milliseconds. Expired traces are evicted on access. Floor: 60,000 (1 min). |
+| `CLAUDE_PROXY_TRACE_SQLITE_PATH` | unset (off) | Optional durable local SQLite trace log. Stores redacted trace metadata/JSON in a `traces` table. Setting this also enables trace collection. |
+| `CLAUDE_PROXY_TRACE_SQLITE_DEBUG` | unset | `1` to log SQLite persistence failures. User requests never fail because durable trace persistence failed. |
+| `CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS` | unset | `1` to request Claude CLI `--exclude-dynamic-system-prompt-sections`; the proxy first checks `claude --help` and skips the flag if unsupported. |
 | `CLAUDE_PROXY_MCP_ALLOW` | unset (all) | Comma-separated list of MCP server names to allow for injection. If set, only listed servers are injected. |
 | `CLAUDE_PROXY_MCP_DENY` | unset (none) | Comma-separated list of MCP server names to deny. Takes precedence over allow. |
 
@@ -184,7 +187,7 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Cheap liveness probe — process up + port bound. No subprocess work. |
+| `/health` | GET | Cheap liveness probe — process up + port bound, Claude CLI version/capability flags, pool, trace, and MCP governance summary. |
 | `/healthz/deep` | GET | Real probe — spawns a `claude --print` with a trivial prompt + 5s budget. Returns `200 {ok, latency_ms, runtime, pool, last_success_ts}` on success, `503 {ok: false, error, …}` on failure. Use for watchdogs. |
 | `/metrics` | GET | Prometheus exposition. See "Metrics" below. |
 | `/models`, `/v1/models` | GET | List served model ids |
@@ -600,11 +603,14 @@ The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATU
 3. **MCP governance mode** — allow/deny policy (`CLAUDE_PROXY_MCP_ALLOW`/`DENY`), native Claude tool deny-list propagation for overlapping caller-dispatched tools, startup warning when MCP injection is enabled, secret resolution tracing (no secret values in traces), and structured audit decisions in trace records.
 4. **Responses API parity** — Responses now uses the same selected runtime path as chat completions where feasible (`stream-json` by default), with text/function-call output items, streaming lifecycle, usage/cost annotations, tool call detection, and trace recording.
 5. **Thin observability export** — optional redacted span-shaped trace export (`generic` or OpenInference-style attributes), disabled by default and fire-and-forget so exporter failures never affect requests.
+6. **Live client matrix** — `npm run sdk:matrix` validates fetch wire-compatibility, Python stdlib compatibility, and optional OpenAI Node/Python + LangChain clients when installed.
+7. **Failure simulation** — `npm run failure:sim` exercises invalid requests, streaming aborts, trace headers, and tool-bridge resilience against live proxy behavior; unit tests cover unsupported CLI flags, corrupt stream-json events, malformed tool JSON, and MCP-style rejected tool calls.
+8. **Durable local traces** — optional SQLite trace persistence via `CLAUDE_PROXY_TRACE_SQLITE_PATH`, storing redacted records for postmortems beyond process memory.
+9. **Claude CLI capability detection** — optional/version-sensitive flags are checked against `claude --help` before being passed; unsupported flags no longer break worker startup.
 
 **Remaining work:**
 
-6. **SDK fixture tests** — expand beyond current adapter/event fixtures into live OpenAI Node/Python client smoke coverage for OpenClaw, LangChain, and local tooling.
-7. **Later, only if useful** — context compression on session eviction, artifact/file output endpoints, semantic cache, or cross-provider routing.
+10. **Later, only if useful** — context compression on session eviction, artifact/file output endpoints, semantic cache, or cross-provider routing.
 
 Deprioritized: building a full router, workflow engine, or generic MCP platform inside this repo. That is how a proxy becomes a haunted appliance with a changelog.
 

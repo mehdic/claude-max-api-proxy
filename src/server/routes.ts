@@ -41,6 +41,7 @@ import { classifyError, isStreamLayerFault, type ProtocolErrorClass } from "../e
 import { createTraceBuilder, type TraceBuilder } from "../trace/builder.js";
 import { traceStore } from "../trace/store.js";
 import { detectOverlappingTools, isMcpInjectionEnabled, mcpGovernanceSummary } from "../mcp/governance.js";
+import { getClaudeCliCapabilities } from "../subprocess/claude-flags.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -1251,12 +1252,19 @@ export function handlePricing(_req: Request, res: Response): void {
  */
 export async function handleHealth(_req: Request, res: Response): Promise<void> {
   const cliVersion = await getCliVersion();
+  const capabilities = await getClaudeCliCapabilities();
   res.json({
     status: "ok",
     provider: "claude-code-cli",
     timestamp: new Date().toISOString(),
     runtime: defaultRuntime(),
     claude_cli_version: cliVersion,
+    claude_cli_capabilities: {
+      source: capabilities.source,
+      checkedAt: capabilities.checkedAt,
+      flags: capabilities.flags,
+      error: capabilities.error,
+    },
     pool: poolStats(),
     trace: traceStore.stats(),
     mcp: mcpGovernanceSummary(),
