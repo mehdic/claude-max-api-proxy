@@ -38,10 +38,10 @@ test("createProgressChunk preserves visible progress content", () => {
 });
 
 test("createProgressChunk can include the assistant role on the first visible chunk", () => {
-  const chunk = createProgressChunk("req123", "claude-sonnet-4", true, "[n8n: workflow · 12s · exec 73]\n");
+  const chunk = createProgressChunk("req123", "claude-sonnet-4", true, "\n[n8n: workflow · 12s · exec 73]\n");
   const delta = chunk.choices[0].delta;
   assert.strictEqual(delta.role, "assistant");
-  assert.strictEqual(delta.content, "[n8n: workflow · 12s · exec 73]\n");
+  assert.strictEqual(delta.content, "\n[n8n: workflow · 12s · exec 73]\n");
 });
 
 test("createProgressChunk refuses non-renderable assistant content", () => {
@@ -78,9 +78,33 @@ test("phase tracker progress produces valid progress chunks", () => {
   assert.ok(phase, "phase tracker should report tool_use start");
   assert.ok(hasRenderableAssistantContent(phase.text), "phase text must be renderable");
   // Verify it can produce a valid progress chunk (no throw).
-  const chunk = createProgressChunk("req_test", "claude-sonnet-4", true, phase.text + "\n");
+  const chunk = createProgressChunk("req_test", "claude-sonnet-4", true, "\n" + phase.text + "\n");
   assert.strictEqual(chunk.choices[0].delta.role, "assistant");
   assert.ok(chunk.choices[0].delta.content?.includes("Bash"));
 
   tracker.detach();
+});
+
+test("thinking phase produces valid progress chunks", () => {
+  const ee = new EventEmitter();
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  const tracker = attachPhaseTracker(ee);
+
+  try {
+    // Advance past 8s silence threshold.
+    now += 9_000;
+    const phase = tracker.poll();
+    assert.ok(phase, "phase tracker should report thinking after silence");
+    assert.ok(hasRenderableAssistantContent(phase.text), "thinking text must be renderable");
+    assert.strictEqual(phase.text, "[Working: thinking\u2026]");
+    // Verify it can produce a valid progress chunk (no throw).
+    const chunk = createProgressChunk("req_think", "claude-sonnet-4", true, "\n" + phase.text + "\n");
+    assert.strictEqual(chunk.choices[0].delta.role, "assistant");
+    assert.ok(chunk.choices[0].delta.content?.includes("thinking"));
+  } finally {
+    tracker.detach();
+    Date.now = originalNow;
+  }
 });
