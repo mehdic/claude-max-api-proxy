@@ -123,7 +123,7 @@ Set `CLAUDE_PROXY_RUNTIME=stream-json` (or leave unset — it's the default). Th
 - **Conversation history caches turn-to-turn.** Empirical: a 3-turn chat went from `cache_read=0` (turn 1) → `cache_read=70K` (turn 2) → `cache_read=70K` (turn 3) — ~99.9% of input tokens served from Anthropic's prompt cache.
 - **Warm latency drops from ~5s to ~1.6s** because the next turn skips the spawn + handshake.
 - **Cold turns are also faster** (~2.9s) because the proxy keeps a per-model pre-initialized "init pool" — the 5s init handshake happens once at startup, not per request.
-- **3-layer keepalive/progress** (eager handshake → visible truthful progress → periodic SSE comment) keeps HTTP/SSE transports warm without fabricating invisible assistant text. When real progress is available, the proxy emits explicit bracketed visible chunks such as `[progress: using Bash…]`, `[progress: waiting for Bash, 12s…]`, or `[n8n: workflow · 9s elapsed · exec 73]`. Generic idle keepalives remain transport-only SSE comments.
+- **3-layer keepalive/progress** (eager handshake → visible truthful progress → periodic SSE comment) keeps HTTP/SSE transports warm without fabricating invisible assistant text. When real progress is available, the proxy emits explicit bracketed visible chunks such as `[Working: using Bash…]`, `[Working: waiting for Bash, 12s…]`, `[Working: thinking…]`, or `[n8n: workflow · 9s elapsed · exec 73]`. The raw Claude `Agent` tool gets special treatment: each call is assigned a deterministic funny subagent name (e.g. "Sir Greps-a-Lot", "Baron von Stacktrace") and, when available, a short activity extracted from the tool input — `[Working: using Sir Greps-a-Lot — inspect auth flow…]` / `[Working: waiting for Sir Greps-a-Lot — inspect auth flow, 12s…]`. Names are deterministic per tool-call id (same call always gets the same name). Other tool names (Read, Bash, etc.) are displayed unchanged. When the main agent is silent with no tool active for ≥8s, the proxy conservatively infers a thinking phase and emits `[Working: thinking…]` once per silent period — this is suppressed as soon as any tool or text activity appears, and is lower priority than all other progress labels. Each visible progress chunk is wrapped with leading and trailing newlines (e.g. `\n[Working: using Bash…]\n`) so it renders on its own line, separated from surrounding model content. Generic idle keepalives remain transport-only SSE comments.
 
 ### `--print` mode (fallback)
 
@@ -530,7 +530,7 @@ Sample flow (claude calling an n8n workflow that takes ~90 s):
 T=0s    user message arrives
 T=2s    claude emits Bash tool_use with curl https://n8n.../webhook/abc...
 T=3s    detector flags "n8n in flight"
-T=12s   keepalive fires → emits "[n8n: my-workflow · 9s elapsed · exec 73]\n"
+T=12s   keepalive fires → emits "\n[n8n: my-workflow · 9s elapsed · exec 73]\n"
 T=22s   keepalive fires → SSE comment (same execution, already reported)
 …
 T=90s   curl returns, claude resumes generation
