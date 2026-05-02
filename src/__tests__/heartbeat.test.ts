@@ -38,10 +38,10 @@ test("createProgressChunk preserves visible progress content", () => {
 });
 
 test("createProgressChunk can include the assistant role on the first visible chunk", () => {
-  const chunk = createProgressChunk("req123", "claude-sonnet-4", true, "[n8n: workflow · 12s · exec 73] ");
+  const chunk = createProgressChunk("req123", "claude-sonnet-4", true, "[n8n: workflow · 12s · exec 73]\n");
   const delta = chunk.choices[0].delta;
   assert.strictEqual(delta.role, "assistant");
-  assert.strictEqual(delta.content, "[n8n: workflow · 12s · exec 73] ");
+  assert.strictEqual(delta.content, "[n8n: workflow · 12s · exec 73]\n");
 });
 
 test("createProgressChunk refuses non-renderable assistant content", () => {
@@ -78,7 +78,7 @@ test("phase tracker progress produces valid progress chunks", () => {
   assert.ok(phase, "phase tracker should report tool_use start");
   assert.ok(hasRenderableAssistantContent(phase.text), "phase text must be renderable");
   // Verify it can produce a valid progress chunk (no throw).
-  const chunk = createProgressChunk("req_test", "claude-sonnet-4", true, phase.text + " ");
+  const chunk = createProgressChunk("req_test", "claude-sonnet-4", true, phase.text + "\n");
   assert.strictEqual(chunk.choices[0].delta.role, "assistant");
   assert.ok(chunk.choices[0].delta.content?.includes("Bash"));
 
