@@ -614,7 +614,7 @@ async function handleStreamJsonRequest(
       if (snap) {
         const line = formatProgress(snap);
         if (snap.executionId !== lastReportedExecution) {
-          content = line + " ";
+          content = line + "\n";
           lastReportedExecution = snap.executionId;
           mode = "progress";
         }
@@ -625,7 +625,7 @@ async function handleStreamJsonRequest(
     if (!hasRenderableAssistantContent(content)) {
       const phase = phaseTracker.poll();
       if (phase) {
-        content = phase.text + " ";
+        content = phase.text + "\n";
         mode = "phase";
       }
     }

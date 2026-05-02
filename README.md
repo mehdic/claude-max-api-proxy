@@ -530,7 +530,7 @@ Sample flow (claude calling an n8n workflow that takes ~90 s):
 T=0s    user message arrives
 T=2s    claude emits Bash tool_use with curl https://n8n.../webhook/abc...
 T=3s    detector flags "n8n in flight"
-T=12s   keepalive fires → emits "[n8n: my-workflow · 9s elapsed · exec 73] "
+T=12s   keepalive fires → emits "[n8n: my-workflow · 9s elapsed · exec 73]\n"
 T=22s   keepalive fires → SSE comment (same execution, already reported)
 …
 T=90s   curl returns, claude resumes generation
