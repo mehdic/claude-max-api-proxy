@@ -27,7 +27,11 @@ If a new Claude model is added, update both the provider model list and this all
 
 ## Timeout posture
 
-OpenClaw default LLM idle timeout is currently `300` seconds. Claude Proxy stream responses emit non-empty ZWSP content heartbeats so OpenClaw-compatible clients see countable activity during long Claude turns.
+OpenClaw default LLM idle timeout is currently `300` seconds. Claude Proxy stream responses use transport-only SSE comment keepalives for generic silence so the proxy does not fabricate assistant `delta.content`. Truthful progress is emitted as visible assistant content when available, in priority order:
+
+1. **n8n workflow progress** — real execution status from the n8n REST API (when `CLAUDE_PROXY_N8N_API_URL` + key are set and the detector sees a webhook call).
+2. **Claude runtime phase** — derived from actual stream-json events, emitted as concise bracketed labels: `[progress: using Bash…]` on tool_use start (reports the real tool name), `[progress: waiting for Bash, 12s…]` after 8s silence with a tool in flight. Deduplicated: the same phase is never emitted twice.
+3. **SSE comment** — transport-only `:keepalive` for generic idle periods with no meaningful phase change. Not parsed as assistant content by OpenAI-compatible clients.
 
 ## Live checks
 

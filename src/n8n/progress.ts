@@ -3,8 +3,8 @@
  *
  * When CLAUDE_PROXY_N8N_API_URL + CLAUDE_PROXY_N8N_API_KEY are set, the proxy
  * can query n8n's REST API to surface the status of a currently-running
- * workflow execution as a keepalive payload — instead of emitting an
- * invisible zero-width space.
+ * workflow execution as a visible progress payload — instead of relying on
+ * a generic transport-only SSE comment keepalive.
  *
  * Best-effort design:
  *   - We don't know the execution_id of the in-flight n8n run (claude calls
