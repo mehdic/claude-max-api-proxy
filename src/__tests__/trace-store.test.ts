@@ -7,7 +7,7 @@ import { extractArgumentKeys, isSecretKey, redactToolChoice, redactEnv } from ".
 import { createTraceBuilder } from "../trace/builder.js";
 import { applyMcpPolicy, applyMcpPolicyWithEnv, detectOverlappingTools, mcpGovernanceSummary, parseList, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { ResolvedMcpServer } from "../mcp/openclaw-config.js";
-import { createHeartbeatChunk, HEARTBEAT_CONTENT } from "../server/routes.js";
+import { createProgressChunk, createSseKeepaliveComment } from "../server/routes.js";
 import { parseToolCalls } from "../adapter/tools.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -402,23 +402,22 @@ test("detectOverlappingTools: empty caller tools returns empty", () => {
   assert.equal(decisions.length, 0);
 });
 
-// ── Heartbeat header presence test ───────────────────────────────────
+// ── Keepalive/progress helper tests ─────────────────────────────────
 
-test("createHeartbeatChunk: includes ZWSP content by default", () => {
-  const chunk = createHeartbeatChunk("req1", "claude-sonnet-4");
-  assert.equal(chunk.choices[0].delta.content, HEARTBEAT_CONTENT);
-  assert.equal(chunk.id, "chatcmpl-req1");
-  assert.equal(chunk.model, "claude-sonnet-4");
+test("createSseKeepaliveComment: emits comment-only keepalive", () => {
+  const frame = createSseKeepaliveComment("req1", 3);
+  assert.equal(frame, ":keepalive req_id=req1 count=3\n\n");
+  assert.equal(frame.includes("data:"), false);
 });
 
-test("createHeartbeatChunk: includes role when requested", () => {
-  const chunk = createHeartbeatChunk("req1", "claude-sonnet-4", true);
+test("createProgressChunk: includes role when requested", () => {
+  const chunk = createProgressChunk("req1", "claude-sonnet-4", true, "n8n progress...");
   assert.equal(chunk.choices[0].delta.role, "assistant");
-  assert.equal(chunk.choices[0].delta.content, HEARTBEAT_CONTENT);
+  assert.equal(chunk.choices[0].delta.content, "n8n progress...");
 });
 
-test("createHeartbeatChunk: custom content overrides ZWSP", () => {
-  const chunk = createHeartbeatChunk("req1", "claude-sonnet-4", false, "n8n progress...");
+test("createProgressChunk: preserves visible content", () => {
+  const chunk = createProgressChunk("req1", "claude-sonnet-4", false, "n8n progress...");
   assert.equal(chunk.choices[0].delta.content, "n8n progress...");
 });
 

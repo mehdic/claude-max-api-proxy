@@ -42,6 +42,7 @@ import { createTraceBuilder, type TraceBuilder } from "../trace/builder.js";
 import { traceStore } from "../trace/store.js";
 import { detectOverlappingTools, isMcpInjectionEnabled, mcpGovernanceSummary } from "../mcp/governance.js";
 import { getClaudeCliCapabilities } from "../subprocess/claude-flags.js";
+import { attachPhaseTracker } from "./phase-tracker.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -85,21 +86,28 @@ function recordToolCallParseOutcome(parsed: Pick<ToolCallParseResult, "toolCalls
 }
 
 /**
- * Non-rendering but non-empty assistant content.
- * OpenClaw's OpenAI-compatible stream adapter only yields activity when it
- * sees countable deltas such as `delta.content` or tool-call deltas. SSE
- * comments, role-only deltas, empty strings, and `delta: {}` do not reset its
- * LLM idle timer.
+ * Transport keepalives must not masquerade as assistant text. Generic idle
+ * protection is sent as standards-compliant SSE comments, while genuinely
+ * useful progress (for example n8n status) can still be emitted as visible
+ * assistant content.
  */
-export const HEARTBEAT_CONTENT = "\u200B";
+export function createSseKeepaliveComment(requestId: string, count: number): string {
+  return `:keepalive req_id=${requestId} count=${count}\n\n`;
+}
 
-export function createHeartbeatChunk(
+export function hasRenderableAssistantContent(text: string): boolean {
+  return text.replace(/[\u200B\u200C\u200D\uFEFF]/g, "").trim().length > 0;
+}
+
+export function createProgressChunk(
   requestId: string,
   model: string,
   includeRole: boolean = false,
-  content: string = HEARTBEAT_CONTENT,
+  content: string,
 ): OpenAIChatChunk {
-  const heartbeatContent = content.length > 0 ? content : HEARTBEAT_CONTENT;
+  if (!hasRenderableAssistantContent(content)) {
+    throw new Error("progress chunk content must be renderable assistant text");
+  }
   return {
     id: `chatcmpl-${requestId}`,
     object: "chat.completion.chunk",
@@ -109,11 +117,35 @@ export function createHeartbeatChunk(
       index: 0,
       delta: {
         ...(includeRole ? { role: "assistant" as const } : {}),
-        content: heartbeatContent,
+        content,
       },
       finish_reason: null,
     }],
   };
+}
+
+/**
+ * When OpenClaw provides tools, the proxy asks Claude to return external tool
+ * calls as a JSON object. We must not stream that JSON into the user-visible
+ * answer preview. But if the response clearly starts as normal prose, we can
+ * safely flush the buffered text and then stream subsequent deltas live.
+ */
+export function shouldHoldBridgeToolStreamText(text: string): boolean {
+  const trimmed = text.trimStart();
+  if (!trimmed) return true;
+
+  const lower = trimmed.toLowerCase();
+  if ("```".startsWith(lower) || "```json".startsWith(lower)) return true;
+
+  if (lower.startsWith("```")) {
+    const fenceMatch = trimmed.match(/^```(?:json)?(?:\s|$)/i);
+    if (!fenceMatch) return false;
+    const afterFence = trimmed.slice(fenceMatch[0].length).trimStart();
+    if (!afterFence) return true;
+    return afterFence.startsWith("{");
+  }
+
+  return trimmed.startsWith("{");
 }
 
 // Counters for /metrics. Keep cardinality fixed.
@@ -552,6 +584,8 @@ async function handleStreamJsonRequest(
   let isFirst = true;
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
+  let bridgeTextBuffer = "";
+  let bridgeTextStreaming = false;
   let done = false;
   let keepaliveCount = 0;
   const requestStartAt = Date.now();
@@ -566,9 +600,15 @@ async function handleStreamJsonRequest(
   const n8nDetector = attachN8nDetector(subprocess);
   let lastReportedExecution = "";
 
+  const phaseTracker = attachPhaseTracker(subprocess);
+
   const writeKeepaliveChunk = async () => {
     if (res.writableEnded) return;
-    let content = HEARTBEAT_CONTENT;
+    keepaliveCount++;
+    let content = "";
+    let mode: "comment" | "progress" | "phase" = "comment";
+
+    // Priority 1: n8n workflow progress (real external system status).
     if (n8nProgressEnabled() && n8nDetector.isInFlight()) {
       const snap = await getRunningExecution();
       if (snap) {
@@ -576,15 +616,29 @@ async function handleStreamJsonRequest(
         if (snap.executionId !== lastReportedExecution) {
           content = line + " ";
           lastReportedExecution = snap.executionId;
+          mode = "progress";
         }
       }
     }
-    const chunk = createHeartbeatChunk(requestId, lastModel, isFirst, content);
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    isFirst = false;
-    keepaliveCount++;
+
+    // Priority 2: Claude runtime phase (tool_use start, tool wait).
+    if (!hasRenderableAssistantContent(content)) {
+      const phase = phaseTracker.poll();
+      if (phase) {
+        content = phase.text + " ";
+        mode = "phase";
+      }
+    }
+
+    if (hasRenderableAssistantContent(content)) {
+      const chunk = createProgressChunk(requestId, lastModel, isFirst, content);
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      isFirst = false;
+    } else {
+      res.write(createSseKeepaliveComment(requestId, keepaliveCount));
+    }
     lastClientActivityAt = Date.now();
-    console.error(`[StreamJson] keepalive req_id=${requestId} count=${keepaliveCount} bridgeTools=${bridgeTools} contentBytes=${Buffer.byteLength(content, "utf8")}`);
+    console.error(`[StreamJson] keepalive req_id=${requestId} count=${keepaliveCount} mode=${mode} bridgeTools=${bridgeTools} contentBytes=${Buffer.byteLength(content, "utf8")}`);
   };
 
   // Layer 1: eager handshake, fires before claude starts.
@@ -671,28 +725,44 @@ async function handleStreamJsonRequest(
   }, WATCHDOG_CHECK_MS);
   const stopWatchdog = () => clearInterval(watchdogTimer);
 
+  const writeContentChunk = (text: string) => {
+    if (!stream || res.writableEnded || !text) return;
+    const chunk = {
+      id: `chatcmpl-${requestId}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: lastModel,
+      choices: [{
+        index: 0,
+        delta: { role: isFirst ? "assistant" as const : undefined, content: text },
+        finish_reason: null,
+      }],
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    isFirst = false;
+    lastClientActivityAt = Date.now();
+  };
+
   const onContentDelta = (event: ClaudeCliStreamEvent) => {
     const text = event.event.delta?.text || "";
     if (!text) return;
     assistantText += text;
     lastClaudeActivityAt = Date.now();
-    if (bridgeTools) return;
-    if (stream && !res.writableEnded) {
-      const chunk = {
-        id: `chatcmpl-${requestId}`,
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: lastModel,
-        choices: [{
-          index: 0,
-          delta: { role: isFirst ? "assistant" : undefined, content: text },
-          finish_reason: null,
-        }],
-      };
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      isFirst = false;
-      lastClientActivityAt = Date.now();
+    if (bridgeTools) {
+      if (!stream || res.writableEnded) return;
+      if (bridgeTextStreaming) {
+        writeContentChunk(text);
+        return;
+      }
+      bridgeTextBuffer += text;
+      if (!shouldHoldBridgeToolStreamText(bridgeTextBuffer)) {
+        bridgeTextStreaming = true;
+        writeContentChunk(bridgeTextBuffer);
+        bridgeTextBuffer = "";
+      }
+      return;
     }
+    writeContentChunk(text);
   };
 
   const onAssistant = (m: ClaudeCliAssistant) => {
@@ -736,7 +806,7 @@ async function handleStreamJsonRequest(
         }
         res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage, "tool_calls"))}\n\n`);
       } else {
-        if (bridgeTools && parsed.textContent) {
+        if (bridgeTools && !bridgeTextStreaming && parsed.textContent) {
           const contentChunk = {
             id: `chatcmpl-${requestId}`,
             object: "chat.completion.chunk" as const,
@@ -777,6 +847,7 @@ async function handleStreamJsonRequest(
     stopKeepalive();
     stopWatchdog();
     n8nDetector.detach();
+    phaseTracker.detach();
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
     subprocess.off("message", onAnyClaudeEvent);

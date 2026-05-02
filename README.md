@@ -123,7 +123,7 @@ Set `CLAUDE_PROXY_RUNTIME=stream-json` (or leave unset — it's the default). Th
 - **Conversation history caches turn-to-turn.** Empirical: a 3-turn chat went from `cache_read=0` (turn 1) → `cache_read=70K` (turn 2) → `cache_read=70K` (turn 3) — ~99.9% of input tokens served from Anthropic's prompt cache.
 - **Warm latency drops from ~5s to ~1.6s** because the next turn skips the spawn + handshake.
 - **Cold turns are also faster** (~2.9s) because the proxy keeps a per-model pre-initialized "init pool" — the 5s init handshake happens once at startup, not per request.
-- **3-layer keepalive** (eager handshake → activity-bound tracker → periodic ZWSP delta) keeps OpenAI clients from tripping their LLM-idle timeout during long claude turns.
+- **3-layer keepalive/progress** (eager handshake → visible truthful progress → periodic SSE comment) keeps HTTP/SSE transports warm without fabricating invisible assistant text. When real progress is available, the proxy emits explicit bracketed visible chunks such as `[progress: using Bash…]`, `[progress: waiting for Bash, 12s…]`, or `[n8n: workflow · 9s elapsed · exec 73]`. Generic idle keepalives remain transport-only SSE comments.
 
 ### `--print` mode (fallback)
 
@@ -513,16 +513,16 @@ Useful env vars for MCP injection:
 
 ## n8n-aware keepalive (optional)
 
-When stream-json mode is on, the proxy emits invisible keepalive chunks every ~10 s of claude silence so consumers don't trip an LLM-idle timeout (see "stream-json mode" above). For one specific case — claude has invoked its `Bash` tool to `curl` an n8n webhook and is now sitting blocked waiting on the workflow — the keepalive can do something more useful than emit zero-width spaces: it can poll n8n's REST API and surface real workflow progress.
+When stream-json mode is on, the proxy emits transport-only SSE comment keepalives every ~10 s of claude silence so HTTP/SSE clients and intermediaries do not treat the connection as dead (see "stream-json mode" above). These generic keepalives are not OpenAI `delta.content` and are not assistant text. For one specific case — claude has invoked its `Bash` tool to `curl` an n8n webhook and is now sitting blocked waiting on the workflow — the keepalive can do something more useful: it can poll n8n's REST API and surface real workflow progress as visible assistant content.
 
 How it works:
 
 1. The proxy watches every `content_block_start` / `content_block_delta` event from claude. When a tool_use input matches `CLAUDE_PROXY_N8N_DETECTION_PATTERN` (default: `n8n.*\/webhook\/`), it flags the next ~30s as "n8n in flight".
 2. While that window is open and `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` are both set, each keepalive fire calls `GET /executions?status=running&limit=1` (3-second cache) to find the most recently started running execution.
-3. The keepalive chunk's `delta.content` becomes a one-line status (`[n8n: <workflow name> · <elapsed>s · exec <id>]`) instead of `​`. Visible to the consumer; resets the LLM-idle timer; tells the user something useful is happening.
-4. The same execution id is only reported once per turn — subsequent keepalives revert to ZWSP — so the response doesn't get spammed with duplicate status lines.
+3. If a new running execution is found, that keepalive is upgraded to a one-line visible status chunk (`[n8n: <workflow name> · <elapsed>s · exec <id>]`). It tells the user something useful is happening instead of sending fake/invisible assistant text.
+4. The same execution id is only reported once per turn — subsequent keepalives fall back to SSE comments — so the response doesn't get spammed with duplicate status lines.
 
-Best-effort by design: any HTTP error, timeout, or no-running-execution result silently falls back to a regular ZWSP keepalive. The feature is **opt-in** via the env vars and a no-op when they're unset.
+Best-effort by design: any HTTP error, timeout, duplicate execution, or no-running-execution result silently falls back to a generic SSE comment keepalive. The feature is **opt-in** via the env vars and a no-op when they're unset.
 
 Sample flow (claude calling an n8n workflow that takes ~90 s):
 
@@ -531,7 +531,7 @@ T=0s    user message arrives
 T=2s    claude emits Bash tool_use with curl https://n8n.../webhook/abc...
 T=3s    detector flags "n8n in flight"
 T=12s   keepalive fires → emits "[n8n: my-workflow · 9s elapsed · exec 73] "
-T=22s   keepalive fires → ZWSP (same execution, already reported)
+T=22s   keepalive fires → SSE comment (same execution, already reported)
 …
 T=90s   curl returns, claude resumes generation
 T=95s   final assistant text streamed normally
