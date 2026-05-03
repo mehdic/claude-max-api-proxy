@@ -5,7 +5,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "events";
-import { attachPhaseTracker, agentNameFor, extractActivity, sanitizeActivity } from "../server/phase-tracker.js";
+import {
+  attachPhaseTracker,
+  agentNameFor,
+  extractActivity,
+  sanitizeActivity,
+  STATUS_PREFIXES,
+} from "../server/phase-tracker.js";
 
 function makeStreamEvent(eventType: string, extra: Record<string, unknown> = {}) {
   return {
@@ -14,6 +20,22 @@ function makeStreamEvent(eventType: string, extra: Record<string, unknown> = {})
     session_id: "",
     uuid: "",
   };
+}
+
+function assertProgressBody(text: string, expectedBody: string): string {
+  const match = text.match(/^\[([^:]+): (.*)\]$/);
+  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
+  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
+  assert.strictEqual(match[2], expectedBody);
+  return match[1];
+}
+
+function assertProgressBodyMatches(text: string, bodyPattern: RegExp): string {
+  const match = text.match(/^\[([^:]+): (.*)\]$/);
+  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
+  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
+  assert.match(match[2], bodyPattern);
+  return match[1];
 }
 
 // ── agentNameFor ────────────────────────────────────────────────────
@@ -117,7 +139,7 @@ test("reports tool_use start with tool name", () => {
   const snap = tracker.poll();
   assert.ok(snap, "should return a phase snapshot");
   assert.match(snap.text, /Read/);
-  assert.match(snap.text, /\[Working: using Read…\]/);
+  assertProgressBody(snap.text, "using Read…");
 
   tracker.detach();
 });
@@ -217,9 +239,9 @@ test("Agent tool displays with a funny subagent name", () => {
   assert.ok(snap, "should return a phase snapshot");
   const expectedName = agentNameFor("tu_agent_1");
   assert.ok(snap.text.includes(expectedName), `should contain funny name "${expectedName}" but got "${snap.text}"`);
-  assert.match(snap.text, /\[Working: using .+…\]/);
-  // Should NOT show raw "Agent" or "Subagent" in the display text.
-  assert.ok(!snap.text.includes("[Working: using Agent…]"), "should not show raw 'Agent'");
+  assertProgressBody(snap.text, `using ${expectedName} Subagent…`);
+  assert.ok(snap.text.includes("Subagent"), "should identify the Agent tool display as a subagent");
+  assert.ok(!snap.text.includes("using Agent…"), "should not show raw 'Agent'");
   // Dedup key must still use the raw tool name so tracking semantics are preserved.
   assert.ok(snap.key.includes("Agent"), "dedup key should contain raw tool name 'Agent'");
   assert.ok(!snap.key.includes("Subagent"), "dedup key must not use display name");
@@ -251,6 +273,7 @@ test("Agent tool with activity from input_json_delta", () => {
   assert.ok(snap2, "should re-emit with activity");
   assert.ok(snap2.text.includes(expectedName));
   assert.ok(snap2.text.includes("\u2014"), "should contain em-dash separator");
+  assert.ok(snap2.text.includes("Subagent"), "should identify the Agent tool display as a subagent");
   assert.match(snap2.text, /inspect auth flow/i);
 
   tracker.detach();
@@ -285,7 +308,7 @@ test("Agent tool wait displays funny name and activity", () => {
     const expectedName = agentNameFor("tu_agent_wait");
     assert.ok(waitSnap.text.includes(expectedName));
     assert.ok(waitSnap.text.includes("12s"), "should include elapsed seconds");
-    assert.match(waitSnap.text, /\[Working: waiting for .+, 12s…\]/);
+    assertProgressBodyMatches(waitSnap.text, /^waiting for .+ Subagent .+, 12s…$/);
     assert.match(waitSnap.key, /Agent/, "dedup key should still use raw tool name");
   } finally {
     tracker.detach();
@@ -312,7 +335,9 @@ test("Agent tool deterministic name: same id always gets same name", () => {
   tracker2.detach();
 
   assert.ok(snap1 && snap2);
-  assert.strictEqual(snap1.text, snap2.text, "same id should produce identical display text");
+  const expectedName = agentNameFor("stable_id_123");
+  assertProgressBody(snap1.text, `using ${expectedName} Subagent…`);
+  assertProgressBody(snap2.text, `using ${expectedName} Subagent…`);
 });
 
 test("Agent tool without activity shows just the funny name", () => {
@@ -326,7 +351,7 @@ test("Agent tool without activity shows just the funny name", () => {
   const snap = tracker.poll();
   assert.ok(snap);
   const expectedName = agentNameFor("tu_no_activity");
-  assert.strictEqual(snap.text, `[Working: using ${expectedName}…]`);
+  assertProgressBody(snap.text, `using ${expectedName} Subagent…`);
   // No em-dash separator when there's no activity.
   assert.ok(!snap.text.includes("\u2014"));
 
@@ -345,7 +370,7 @@ test("non-Agent tool names are not renamed", () => {
     }));
     const snap = tracker.poll();
     assert.ok(snap);
-    assert.strictEqual(snap.text, `[Working: using ${name}…]`, `${name} should not be renamed`);
+    assertProgressBody(snap.text, `using ${name}…`);
     // Reset state by emitting a text block.
     ee.emit("message", makeStreamEvent("content_block_start", {
       content_block: { type: "text", text: "" },
@@ -421,7 +446,7 @@ test("reports thinking after 8s silence before activity", () => {
     now += 9_000;
     const snap2 = tracker.poll();
     assert.ok(snap2, "should report thinking after 8s silence");
-    assert.strictEqual(snap2.text, "[Working: thinking\u2026]");
+    assertProgressBody(snap2.text, "thinking\u2026");
     assert.ok(snap2.key.startsWith("thinking:"), "key should start with thinking:");
   } finally {
     tracker.detach();
@@ -473,7 +498,7 @@ test("thinking is suppressed once tool_use starts", () => {
     const snap = tracker.poll();
     // Should report tool_use, not thinking.
     assert.ok(snap);
-    assert.match(snap.text, /\[Working: (?:using|waiting for) Read/);
+    assertProgressBodyMatches(snap.text, /^(?:using|waiting for) Read/);
     assert.ok(!snap.text.includes("thinking"), "should not report thinking when tool is active");
   } finally {
     tracker.detach();

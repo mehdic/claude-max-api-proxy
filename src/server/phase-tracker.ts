@@ -4,11 +4,11 @@
  * Watches raw stream-json events from a Claude subprocess and derives
  * truthful progress descriptions for meaningful runtime phases:
  *
- *   - tool_use start  → "[Working: using Read…]" (real tool name from the event)
- *   - long tool wait   → "[Working: waiting for Read, 12s…]" (only after silence threshold)
- *   - Agent tool       → "[Working: using Sir Greps-a-Lot — inspect auth flow…]"
+ *   - tool_use start  → "[Thinking: using Read…]" (real tool name from the event)
+ *   - long tool wait   → "[Tinkering: waiting for Read, 12s…]" (only after silence threshold)
+ *   - Agent tool       → "[Checking: using Sir Greps-a-Lot Subagent — inspect auth flow…]"
  *                        (deterministic funny name + extracted activity)
- *   - thinking         → "[Working: thinking…]" (inferred: no tool/text activity
+ *   - thinking         → "[Reviewing: thinking…]" (inferred: no tool/text activity
  *                        for ≥8s — conservative, fires once per silent period)
  *   - n8n progress     → delegated to the existing n8n progress module
  *
@@ -21,6 +21,33 @@ import type { EventEmitter } from "events";
 
 /** Minimum silence (ms) before we report "waiting for tool result". */
 const TOOL_WAIT_THRESHOLD_MS = 8_000;
+
+/**
+ * Short visible status prefixes. A random prefix is chosen only when a new
+ * semantic phase is emitted; the phase body remains event-derived.
+ */
+export const STATUS_PREFIXES: readonly string[] = [
+  "Thinking",
+  "Tinkering",
+  "Checking",
+  "Reviewing",
+  "Inspecting",
+  "Tracing",
+  "Working",
+  "Reading",
+  "Scanning",
+  "Sorting",
+  "Drafting",
+  "Testing",
+] as const;
+
+function statusPrefix(): string {
+  return STATUS_PREFIXES[Math.floor(Math.random() * STATUS_PREFIXES.length)];
+}
+
+function renderProgress(body: string): string {
+  return `[${statusPrefix()}: ${body}]`;
+}
 
 /**
  * Whimsical subagent names for Agent tool calls. The list is intentionally
@@ -116,7 +143,7 @@ export function sanitizeActivity(raw: string): string | null {
  * Build the display label for an Agent tool call.
  */
 function agentDisplayLabel(toolCallId: string, activity: string | null): string {
-  const name = agentNameFor(toolCallId);
+  const name = `${agentNameFor(toolCallId)} Subagent`;
   if (activity) {
     return `${name} \u2014 ${activity}`;
   }
@@ -258,19 +285,26 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
     return displayName(activeToolName!);
   };
 
+  const getToolPhaseKey = (): string => {
+    if (activeToolName === "Agent") {
+      return agentActivity || "";
+    }
+    return "";
+  };
+
   return {
     poll(): PhaseSnapshot | null {
       const now = Date.now();
       const label = activeToolName ? getToolLabel() : "";
 
       // Phase 1: tool_use start (or activity update for Agent).
-      // The label is included in the key so that when activity is extracted
-      // after the initial report, the phase naturally re-emits once.
+      // Agent activity is included in the semantic key so that when activity is
+      // extracted after the initial report, the phase naturally re-emits once.
       if (activeToolName && !toolWaitReported) {
-        const key = `tool_use:${activeToolName}:${toolStartedAt}:${label}`;
+        const key = `tool_use:${activeToolName}:${toolStartedAt}:${getToolPhaseKey()}`;
         if (key !== currentPhase) {
           currentPhase = key;
-          return { text: `[Working: using ${label}…]`, key };
+          return { text: renderProgress(`using ${label}\u2026`), key };
         }
       }
 
@@ -283,7 +317,7 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
           if (key !== currentPhase) {
             currentPhase = key;
             const secs = Math.round(elapsed / 1000);
-            return { text: `[Working: waiting for ${label}, ${secs}s…]`, key };
+            return { text: renderProgress(`waiting for ${label}, ${secs}s\u2026`), key };
           }
         }
       }
@@ -298,7 +332,7 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
           const key = `thinking:${lastActivityAt}`;
           if (key !== currentPhase) {
             currentPhase = key;
-            return { text: "[Working: thinking\u2026]", key };
+            return { text: renderProgress("thinking\u2026"), key };
           }
         }
       }

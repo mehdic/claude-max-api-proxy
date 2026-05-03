@@ -13,7 +13,14 @@ import {
   createSseKeepaliveComment,
   hasRenderableAssistantContent,
 } from "../server/routes.js";
-import { attachPhaseTracker } from "../server/phase-tracker.js";
+import { attachPhaseTracker, STATUS_PREFIXES } from "../server/phase-tracker.js";
+
+function assertProgressBody(text: string, expectedBody: string): void {
+  const match = text.match(/^\[([^:]+): (.*)\]$/);
+  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
+  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
+  assert.strictEqual(match[2], expectedBody);
+}
 
 test("generic keepalive is an SSE comment, not a data chunk", () => {
   const frame = createSseKeepaliveComment("req123", 7);
@@ -98,7 +105,7 @@ test("thinking phase produces valid progress chunks", () => {
     const phase = tracker.poll();
     assert.ok(phase, "phase tracker should report thinking after silence");
     assert.ok(hasRenderableAssistantContent(phase.text), "thinking text must be renderable");
-    assert.strictEqual(phase.text, "[Working: thinking\u2026]");
+    assertProgressBody(phase.text, "thinking\u2026");
     // Verify it can produce a valid progress chunk (no throw).
     const chunk = createProgressChunk("req_think", "claude-sonnet-4", true, "\n" + phase.text + "\n");
     assert.strictEqual(chunk.choices[0].delta.role, "assistant");
