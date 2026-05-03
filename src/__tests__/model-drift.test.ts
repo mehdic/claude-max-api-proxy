@@ -127,8 +127,8 @@ test("MODEL_MAP drift report: routable but unadvertised models (informational)",
   const advertisedSet = new Set(HANDLE_MODELS_IDS);
   const unadvertised = MODEL_MAP_BARE_IDS.filter((id) => !advertisedSet.has(id));
   if (unadvertised.length > 0) {
-    console.log(`[model-drift] INFO: ${unadvertised.length} MODEL_MAP entries are routable but not in handleModels: ${unadvertised.join(", ")}`);
-    console.log("[model-drift] INFO: This is expected for hidden/deprecated models. Add them to handleModels if they should be discoverable.");
+    process.stderr.write(`[model-drift] INFO: ${unadvertised.length} MODEL_MAP entries are routable but not in handleModels: ${unadvertised.join(", ")}\n`);
+    process.stderr.write("[model-drift] INFO: This is expected for hidden/deprecated models. Add them to handleModels if they should be discoverable.\n");
   }
   // This is informational — always passes. The operator decides whether to promote.
   assert.ok(true);

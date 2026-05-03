@@ -79,23 +79,27 @@ test("extractActivity returns null for empty or useless input", () => {
 test("sanitizeActivity collapses whitespace and truncates", () => {
   const long = "A".repeat(100);
   const result = sanitizeActivity(long);
+  assert.ok(result);
   assert.ok(result.length <= 60);
   assert.ok(result.endsWith("\u2026")); // ellipsis
 });
 
 test("sanitizeActivity lowercases first char", () => {
   const result = sanitizeActivity("Inspect the files");
+  assert.ok(result);
   assert.strictEqual(result[0], "i");
 });
 
 test("sanitizeActivity strips secret-like tokens", () => {
   const result = sanitizeActivity("Use token sk-abc123456789xyz for auth");
+  assert.ok(result);
   assert.ok(!result.includes("sk-abc123456789xyz"));
   assert.ok(result.includes("***"));
 });
 
 test("sanitizeActivity collapses newlines", () => {
   const result = sanitizeActivity("line one\nline two\nline three");
+  assert.ok(result);
   assert.ok(!result.includes("\n"));
   assert.match(result, /line one line two line three/);
 });
@@ -401,7 +405,7 @@ test("Agent tool extracts activity on content_block_stop if not yet extracted", 
 
 // ── PhaseTracker: thinking phase (inferred silence) ─────────────────
 
-test("reports thinking after 8s silence before any activity", () => {
+test("reports thinking after 8s silence before activity", () => {
   const ee = new EventEmitter();
   const originalNow = Date.now;
   let now = 1_000_000;

@@ -81,6 +81,35 @@ function emptyPluginConfigSchema() {
   };
 }
 
+interface PluginPrompter {
+  progress(message: string): { message(message: string): void; stop(message: string): void };
+  note(message: string, title?: string): Promise<void>;
+  text(options: {
+    message: string;
+    initialValue: string;
+    validate: (value: string) => string | undefined;
+  }): Promise<string>;
+}
+
+interface PluginAuthContext {
+  prompter: PluginPrompter;
+}
+
+interface PluginCliCommand {
+  description(text: string): PluginCliCommand;
+  action(handler: (...args: string[]) => void | Promise<void>): PluginCliCommand;
+}
+
+interface PluginCli {
+  command(signature: string): PluginCliCommand;
+}
+
+interface PluginApi {
+  registerProvider(provider: unknown): void;
+  on(event: "plugin:unload", handler: () => void | Promise<void>): void;
+  registerCli?: (handler: (cli: PluginCli) => void) => void;
+}
+
 /**
  * Plugin definition
  */
@@ -91,7 +120,7 @@ const claudeCodeCliPlugin = {
     "Use Claude Max subscription via Claude Code CLI (bypasses OAuth restrictions)",
   configSchema: emptyPluginConfigSchema(),
 
-  register(api: any) {
+  register(api: PluginApi) {
     let serverPort = DEFAULT_PORT;
 
     // Register the provider
@@ -109,7 +138,7 @@ const claudeCodeCliPlugin = {
           hint: "Uses your existing Claude Code CLI authentication (from Claude Max)",
           kind: "custom",
 
-          run: async (ctx: any) => {
+          run: async (ctx: PluginAuthContext) => {
             const spin = ctx.prompter.progress("Checking Claude CLI...");
 
             try {
@@ -218,7 +247,7 @@ const claudeCodeCliPlugin = {
     });
 
     // Register CLI command for manual server control
-    api.registerCli?.((cli: any) => {
+    api.registerCli?.((cli) => {
       cli
         .command("claude-cli:start [port]")
         .description("Start the Claude CLI proxy server")

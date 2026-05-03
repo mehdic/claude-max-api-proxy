@@ -97,7 +97,7 @@ export function extractActivity(partialJson: string): string | null {
  * Sanitize an extracted activity string for display: single line, truncated,
  * no secrets or excessive content.
  */
-export function sanitizeActivity(raw: string): string {
+export function sanitizeActivity(raw: string): string | null {
   // Collapse whitespace/newlines to single spaces.
   let clean = raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
   // Strip anything that looks like a secret/token/path.
@@ -109,7 +109,7 @@ export function sanitizeActivity(raw: string): string {
   if (clean.length > ACTIVITY_MAX_LEN) {
     clean = clean.slice(0, ACTIVITY_MAX_LEN - 1).trimEnd() + "\u2026";
   }
-  return clean || null as unknown as string;
+  return clean || null;
 }
 
 /**
