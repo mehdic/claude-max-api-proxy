@@ -6,7 +6,7 @@
  * picks up where it left off — turn 2 reads turn 1's prefix from Anthropic's
  * prompt cache.
  *
- * On a miss, we kill any orphan subprocess for stale keys and either:
+ * On a miss, we kill orphan subprocesses for stale keys and either:
  *   - send the entire conversation as a single flattened user message (cold)
  *   - or replay each prior turn (not implemented; would re-bill assistant turns)
  *
@@ -51,7 +51,7 @@ interface Slot {
   key: string;
   lastUsedAt: number;
   // Fingerprint snapshot taken at insertion time. We compare against this
-  // when checking out a worker; any drift (model rename, env change between
+  // when checking out a worker; drift (model rename, env change between
   // request and re-use) routes the request to a cold spawn instead of
   // reusing a worker whose init context no longer matches.
   fingerprint: SlotFingerprint;

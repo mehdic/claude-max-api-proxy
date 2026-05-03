@@ -142,7 +142,8 @@ When using `--input-format stream-json`, send JSON lines to stdin:
 {"type": "user_message", "content": "Hello, how are you?"}
 ```
 
-**TODO:** Need to verify exact input format with testing.
+The proxy's stream-json runtime writes newline-delimited JSON requests and
+validates parsing behavior in the stream-json regression tests.
 
 ## Session Management
 

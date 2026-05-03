@@ -224,7 +224,7 @@ function getDescendantPids(rootPid: number, depth: number = 0): number[] {
 /**
  * Sample the process tree rooted at `rootPid` and return aggregate stats.
  *
- * Returns null on any sampling failure (non-fatal — the watchdog treats
+ * Returns null on sampling failure (non-fatal — the watchdog treats
  * null as "no descendant info available" and does not suppress soft-dead).
  *
  * Intentionally synchronous: runs only in the watchdog timer (every 30s,

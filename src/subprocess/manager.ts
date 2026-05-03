@@ -77,7 +77,7 @@ export class ClaudeSubprocess extends EventEmitter {
           }
         });
 
-        // Set up output listeners eagerly so a warm process pre-buffers any
+        // Set up output listeners eagerly so a warm process pre-buffers
         // startup-banner output rather than blocking on the pipe.
         this.process.stdout?.on("data", (chunk: Buffer) => {
           const data = chunk.toString();

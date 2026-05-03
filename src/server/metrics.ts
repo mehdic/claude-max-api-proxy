@@ -7,7 +7,7 @@
  *
  * Cardinality discipline: we never label by request id, prompt hash,
  * full model id from request (only canonical ids from MODEL_MAP), or
- * any user-controlled string. Reasons for fallback are from a fixed
+ * user-controlled strings. Reasons for fallback are from a fixed
  * allowlist defined in routes.ts classifyFallbackReason().
  *
  * Counters live where they're produced (poolCounters in session-pool.ts,

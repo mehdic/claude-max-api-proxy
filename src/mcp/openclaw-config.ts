@@ -1,5 +1,5 @@
 /**
- * Read MCP-server registrations from openclaw.json (or any compatible JSON
+ * Read MCP-server registrations from openclaw.json (or compatible JSON
  * file) and produce inline `--mcp-config` shape, with secret references
  * resolved via openclaw's own keychain resolver.
  *

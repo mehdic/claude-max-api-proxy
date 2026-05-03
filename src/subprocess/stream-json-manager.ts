@@ -187,7 +187,7 @@ export class StreamJsonSubprocess extends EventEmitter {
       this.process.on("close", (code) => {
         if (this.buffer.trim()) this.processBuffer();
         this.emit("close", code);
-        // Reject any pending control requests
+        // Reject pending control requests for this worker.
         for (const cb of this.pendingControl.values()) {
           cb(new Error(`subprocess closed with code ${code}`));
         }

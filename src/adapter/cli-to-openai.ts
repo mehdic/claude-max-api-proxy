@@ -110,7 +110,7 @@ export function createToolCallChunks(
  * Convert Claude CLI result to OpenAI non-streaming response.
  *
  * When `hasTools` is true, scans the result text for tool_call JSON blocks
- * and converts them to OpenAI-format tool_calls. The remaining text (if any)
+ * and converts them to OpenAI-format tool_calls. Remaining text, when present,
  * becomes the content field; if the entire response is tool calls, content
  * is set to null.
  */
@@ -136,7 +136,7 @@ export function cliResultToOpenai(
     if (parsed.toolCalls.length > 0) {
       toolCalls = parsed.toolCalls;
       // OpenAI tool-call assistant messages should not carry prose content.
-      // Drop any model preamble around the JSON tool request.
+      // Drop model preamble around the JSON tool request.
       content = null;
       finishReason = "tool_calls";
     }
@@ -185,7 +185,7 @@ export function resultUsageToOpenAI(result: ClaudeCliResult): OpenAIUsage {
  * e.g., "claude-sonnet-4-5-20250929" -> "claude-sonnet-4"
  */
 /**
- * Defensively convert any value to string to prevent [object Object] in responses
+ * Defensively convert unknown values to strings to prevent [object Object] in responses.
  */
 function ensureString(value: unknown): string {
   if (typeof value === "string") return value;
