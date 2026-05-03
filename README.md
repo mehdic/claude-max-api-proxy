@@ -4,7 +4,7 @@
 
 This proxy wraps the official `claude` CLI as a subprocess and exposes an OpenAI-compatible HTTP API on `127.0.0.1:3456`. Any tool that speaks the OpenAI `chat/completions` or minimal `responses` format — [openclaw](https://github.com/openclaw/openclaw), Continue.dev, Aider, OpenWebUI, custom agents, OpenAI SDK clients, anything — can point at it and route traffic through your existing Claude subscription's OAuth tokens.
 
-Current release: **v1.0.4**. The production path is the persistent `stream-json` runtime with pre-initialized workers, session pooling, SSE keepalives, usage/cost reporting, caller-dispatched OpenAI/OpenClaw tool calls, optional MCP injection, minimal Responses compatibility, model-drift tests, and live soak coverage.
+Current release: **v1.0.6** plus post-release regression hardening. The production path is the persistent `stream-json` runtime with pre-initialized workers, session pooling, SSE keepalives, usage/cost reporting, caller-dispatched OpenAI/OpenClaw tool calls, optional MCP injection, practical Responses compatibility, model-drift tests, failure simulation, live soak coverage, and expanded edge-case regression coverage.
 
 > **Tested with openclaw `2026.4.24`** as a drop-in `openai-completions` provider. Multi-turn cache hits, streaming, and the SSE keepalive have all been verified against live openclaw traffic on this version. See [openclaw integration](#openclaw) below for the exact provider config.
 
@@ -94,9 +94,20 @@ Implemented in the current release:
 - Optional inner Claude MCP injection via `CLAUDE_PROXY_TOOLS_TRANSLATION=1` with allow/deny governance policy (`CLAUDE_PROXY_MCP_ALLOW`, `CLAUDE_PROXY_MCP_DENY`).
 - **Request tracing** — every request gets a stable `trace_id` returned in `X-Claude-Proxy-Trace-Id`. Optional bounded in-memory trace store (`CLAUDE_PROXY_TRACE_ENABLED=1`) with localhost-gated `GET /traces` and `GET /traces/:id` endpoints for debugging tool bridge, MCP governance decisions, error classification, and session pooling. Optional SQLite persistence supports retention via `CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS`; see [`docs/TRACE_SECURITY.md`](docs/TRACE_SECURITY.md).
 - **Protocol error classification** — explicit bounded `ProtocolErrorClass` taxonomy replaces ad-hoc string matching. All errors map to one of ~15 fixed labels safe for Prometheus and trace records.
-- Model drift tests, live soak scripts, SDK/client matrix, failure simulation, stream-json canary, and lightweight live monitor.
+- Model drift tests, live soak scripts, SDK/client matrix, failure simulation, stream-json canary, lightweight live monitor, and expanded regression coverage for OpenAI adapter, Responses API, tool bridge, prompt escaping, and phase-tracker edge cases.
 
 Planned work is tracked in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
+
+### Current validation baseline
+
+As of the 2026-05-03 regression-hardening pass, the maintained branch has:
+
+- `npm run build` passing.
+- `npm test` passing with **265** tests.
+- `npm run failure:sim` passing.
+- Live LaunchAgent deployment on `ai.openclaw.claude-proxy` (`127.0.0.1:3456`) verified with `/health` returning `runtime: stream-json` and Claude CLI `2.1.104`.
+- End-to-end OpenClaw behavior tested against the deployed build before merging to `main`.
+
 
 ## Available models
 
