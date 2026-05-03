@@ -9,6 +9,7 @@ import { applyMcpPolicy, applyMcpPolicyWithEnv, detectOverlappingTools, mcpGover
 import type { ResolvedMcpServer } from "../mcp/openclaw-config.js";
 import { createProgressChunk, createSseKeepaliveComment } from "../server/routes.js";
 import { parseToolCalls } from "../adapter/tools.js";
+import type { OpenAIChatRequest } from "../types/openai.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -335,7 +336,7 @@ test("TraceBuilder: records tool results from request messages", () => {
     endpoint: "chat.completions",
   });
 
-  tb.setBridgeTools(true, {
+  const request: OpenAIChatRequest = {
     tools: [{ type: "function", function: { name: "n8n__search", parameters: {} } }],
     tool_choice: "auto",
     messages: [
@@ -344,7 +345,8 @@ test("TraceBuilder: records tool results from request messages", () => {
       { role: "tool", content: '{"results":[]}', tool_call_id: "c1", name: "search" },
     ],
     model: "claude-sonnet-4-6",
-  } as any);
+  };
+  tb.setBridgeTools(true, request);
   tb.commit();
   assert.equal(tb.traceId, "trc_tools");
 });

@@ -114,6 +114,65 @@ test("responsesToChatRequest: developer role preserved", () => {
   assert.equal(chat.messages[0].role, "developer");
 });
 
+test("responsesToChatRequest: instructions-only request adds empty user message", () => {
+  const req: ResponsesRequest = {
+    model: "claude-sonnet-4-6",
+    input: [],
+    instructions: "Stay concise.",
+  };
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.messages[0].role, "system");
+  assert.equal(chat.messages[1].role, "user");
+  assert.equal(chat.messages[1].content, "");
+});
+
+test("responsesToChatRequest: unknown input item role falls back to user", () => {
+  const req: ResponsesRequest = JSON.parse(JSON.stringify({
+    model: "claude-sonnet-4-6",
+    input: [{ role: "operator", content: "Fallback text" }],
+  }));
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.messages[0].role, "user");
+  assert.equal(chat.messages[0].content, "Fallback text");
+});
+
+test("responsesToChatRequest: output_text content parts are preserved", () => {
+  const req: ResponsesRequest = {
+    model: "claude-sonnet-4-6",
+    input: [{ role: "assistant", content: [{ type: "output_text", text: "Prior answer" }] }],
+  };
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.messages[0].role, "assistant");
+  assert.equal(chat.messages[0].content, "Prior answer");
+});
+
+test("responsesToChatRequest: non-text content parts are ignored", () => {
+  const req: ResponsesRequest = JSON.parse(JSON.stringify({
+    model: "claude-sonnet-4-6",
+    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:" }] }],
+  }));
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.messages[0].role, "user");
+  assert.equal(chat.messages[0].content, "");
+});
+
+test("responsesToChatRequest: temperature zero is preserved", () => {
+  const req: ResponsesRequest = { model: "claude-sonnet-4-6", input: "Hi", temperature: 0 };
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.temperature, 0);
+});
+
+test("responsesToChatRequest: required tool_choice passes through", () => {
+  const req: ResponsesRequest = {
+    model: "claude-sonnet-4-6",
+    input: "Use a tool",
+    tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+    tool_choice: "required",
+  };
+  const chat = responsesToChatRequest(req);
+  assert.equal(chat.tool_choice, "required");
+});
+
 // ── Response translation ──────────────────────────────────────────
 
 function chatResponse(text: string, usage?: Partial<OpenAIUsage>): OpenAIChatResponse {
@@ -235,6 +294,11 @@ test("buildTextDeltaEvent: produces valid delta event", () => {
   assert.equal(evt.content_index, 0);
 });
 
+test("buildTextDeltaEvent: preserves multiline delta text", () => {
+  const evt = JSON.parse(buildTextDeltaEvent("line one\nline two"));
+  assert.equal(evt.delta, "line one\nline two");
+});
+
 test("buildStreamDoneEvents: emits text.done, part.done, item.done, response.completed", () => {
   const usage = { input_tokens: 100, output_tokens: 50, total_tokens: 150 };
   const events = buildStreamDoneEvents("resp_abc", "msg_xyz", "claude-sonnet-4-6", "Full text", usage);
@@ -331,6 +395,10 @@ test("toolCallsToFunctionCallOutputs: maps call ids and arguments", () => {
   assert.equal(fcs[0].status, "completed");
 });
 
+test("toolCallsToFunctionCallOutputs: empty input returns empty output", () => {
+  assert.deepEqual(toolCallsToFunctionCallOutputs([]), []);
+});
+
 test("buildFunctionCallStreamEvents: emits added, arguments.done, item.done per tool call", () => {
   const tcs: OpenAIToolCall[] = [
     { id: "call_s1", type: "function", function: { name: "search", arguments: '{"q":"hi"}' } },
@@ -365,6 +433,10 @@ test("buildFunctionCallStreamEvents: multiple tool calls get incrementing output
   // First call at output_index 1, second at 2
   assert.equal(JSON.parse(events[0]).output_index, 1);
   assert.equal(JSON.parse(events[3]).output_index, 2);
+});
+
+test("buildFunctionCallStreamEvents: empty calls emit no events", () => {
+  assert.deepEqual(buildFunctionCallStreamEvents([], 1), []);
 });
 
 test("buildStreamDoneEvents: function calls are included before response.completed", () => {

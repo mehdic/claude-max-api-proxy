@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { cliResultToOpenai, createDoneChunk, createToolCallChunks } from "../adapter/cli-to-openai.js";
 import { messagesToPrompt, openaiToCli } from "../adapter/openai-to-cli.js";
-import { externalNativeToolDisallowList, parseToolCalls, shouldBridgeExternalTools, toolDefsToPrompt } from "../adapter/tools.js";
+import { assistantToolCallsToPrompt, externalNativeToolDisallowList, parseToolCalls, shouldBridgeExternalTools, toolDefsToPrompt } from "../adapter/tools.js";
 import type { OpenAIChatRequest } from "../types/openai.js";
 import type { ClaudeCliResult } from "../types/claude-cli.js";
 
@@ -129,4 +129,68 @@ test("streaming tool call helpers emit valid tool_calls delta and finish reason"
   const chunks = createToolCallChunks("req1", "claude-sonnet-4-6", response.choices[0].message.tool_calls || []);
   assert.equal(chunks[0].choices[0].delta.tool_calls?.[0].function?.name, tool.function.name);
   assert.equal(createDoneChunk("req1", "claude-sonnet-4-6", null, "tool_calls").choices[0].finish_reason, "tool_calls");
+});
+
+test("parseToolCalls accepts top-level name and arguments shape", () => {
+  const parsed = parseToolCalls('{"name":"n8n__n8n_list_workflows","arguments":{"limit":9}}', req());
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0].function.name, tool.function.name);
+  assert.equal(JSON.parse(parsed.toolCalls[0].function.arguments).limit, 9);
+});
+
+test("parseToolCalls ignores non-object arguments safely", () => {
+  const parsed = parseToolCalls('{"tool_call":{"name":"n8n__n8n_list_workflows","arguments":["bad"]}}', req());
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0].function.arguments, "{}");
+});
+
+test("parseToolCalls preserves caller supplied tool call id", () => {
+  const parsed = parseToolCalls('{"tool_call":{"id":"call_fixed","name":"n8n__n8n_list_workflows","arguments":{}}}', req());
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0].id, "call_fixed");
+});
+
+test("parseToolCalls generates OpenAI-style id when missing", () => {
+  const parsed = parseToolCalls('{"tool_call":{"name":"n8n__n8n_list_workflows","arguments":{}}}', req());
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.match(parsed.toolCalls[0].id, /^call_/);
+});
+
+test("named tool_choice for unknown tool rejects all parsed calls", () => {
+  const request = req({ tool_choice: { type: "function", function: { name: "missing_tool" } } });
+  const parsed = parseToolCalls('{"tool_call":{"name":"n8n__n8n_list_workflows","arguments":{}}}', request);
+  assert.equal(parsed.toolCalls.length, 0);
+  assert.equal(parsed.diagnostics.rejectedToolCalls, 1);
+});
+
+test("parseToolCalls reports malformed attempted bridge JSON", () => {
+  const parsed = parseToolCalls('{"tool_call":{"name":"n8n__n8n_list_workflows","arguments":{', req());
+  assert.equal(parsed.toolCalls.length, 0);
+  assert.equal(parsed.diagnostics.malformedJsonObjects, 1);
+  assert.equal(parsed.diagnostics.attemptedToolCall, true);
+});
+
+test("parseToolCalls removes rejected tool JSON from text content", () => {
+  const parsed = parseToolCalls('before {"tool_call":{"name":"not_allowed","arguments":{}}} after', req());
+  assert.equal(parsed.toolCalls.length, 0);
+  assert.equal(parsed.textContent, "before  after");
+  assert.equal(parsed.diagnostics.rejectedToolCalls, 1);
+});
+
+test("messagesToPrompt escapes tool result attributes", () => {
+  const prompt = messagesToPrompt([
+    { role: "tool", tool_call_id: 'call_"<&', name: 'tool_"<&', content: "ok" },
+  ], req());
+  assert.match(prompt, /name="tool_&quot;&lt;&amp;"/);
+  assert.match(prompt, /tool_call_id="call_&quot;&lt;&amp;"/);
+});
+
+test("assistantToolCallsToPrompt escapes JSON string fields", () => {
+  const prompt = assistantToolCallsToPrompt({
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id: 'call_"x', type: "function", function: { name: 'tool_"y', arguments: "{}" } }],
+  });
+  assert.match(prompt, /\\"x/);
+  assert.match(prompt, /\\"y/);
 });
