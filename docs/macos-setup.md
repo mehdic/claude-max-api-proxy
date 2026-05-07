@@ -1,120 +1,131 @@
-# macOS Auto-Start Setup
+# macOS LaunchAgent reference
 
-This guide shows how to configure the Claude Code CLI Provider to start automatically when you log in.
+This is a focused LaunchAgent reference for running `claude-proxy` as a local user service on macOS. For the full install flow, see [Setup](setup.md). For environment variable details, see [Configuration](configuration.md).
 
-## Create LaunchAgent
+## Before you start
 
-1. Create the plist file:
+Build the project and confirm it works in the foreground:
 
 ```bash
-cat > ~/Library/LaunchAgents/com.claude-code-provider.plist << 'PLIST'
+npm install
+npm run build
+npm start
+curl -s http://127.0.0.1:3456/health
+```
+
+Find the paths you will need:
+
+```bash
+which node
+which claude
+echo "$HOME"
+pwd
+```
+
+If you use optional binaries such as `n8n-mcp`, find those too:
+
+```bash
+which n8n-mcp
+```
+
+## Example plist
+
+Save as `~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist` and replace placeholders.
+
+```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.openclaw.claude-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string><path-to-node></string>
+    <string><path-to-repo>/dist/server/standalone.js</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
   <dict>
-    <key>Label</key>
-    <string>com.claude-code-provider</string>
-    
-    <key>Comment</key>
-    <string>Claude Code CLI Provider (uses Claude Max subscription)</string>
-    
-    <key>RunAtLoad</key>
-    <true/>
-    
-    <key>KeepAlive</key>
-    <true/>
-    
-    <key>ProgramArguments</key>
-    <array>
-      <string>/opt/homebrew/bin/node</string>
-      <string>/path/to/claude-code-cli-provider/dist/server/standalone.js</string>
-    </array>
-    
-    <key>StandardOutPath</key>
-    <string>/tmp/claude-provider.log</string>
-    
-    <key>StandardErrorPath</key>
-    <string>/tmp/claude-provider.err.log</string>
-    
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>HOME</key>
-      <string>/Users/YOUR_USERNAME</string>
-      <key>PATH</key>
-      <string>/Users/YOUR_USERNAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    </dict>
+    <key>HOME</key><string><HOME></string>
+    <key>PATH</key><string><path-containing-claude>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+
+    <key>CLAUDE_PROXY_PORT</key><string>3456</string>
+    <key>CLAUDE_PROXY_RUNTIME</key><string>stream-json</string>
+    <key>CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE</key><string>1</string>
+
+    <!-- Trusted local service mode only. -->
+    <key>CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS</key><string>true</string>
   </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+
+  <key>StandardOutPath</key><string><HOME>/Library/Logs/claude-proxy.stdout.log</string>
+  <key>StandardErrorPath</key><string><HOME>/Library/Logs/claude-proxy.stderr.log</string>
+</dict>
 </plist>
-PLIST
 ```
 
-2. **Important:** Edit the file and replace:
-   - `/path/to/claude-code-cli-provider` with your actual path
-   - `/Users/YOUR_USERNAME` with your actual username
-   - Ensure the PATH includes the directory containing `claude` (check with `which claude`)
+Optional tracing:
 
-## Load the Service
+```xml
+<key>CLAUDE_PROXY_TRACE_SQLITE_PATH</key><string><HOME>/.claude-proxy/traces.sqlite</string>
+<key>CLAUDE_PROXY_TRACE_SQLITE_RETENTION_DAYS</key><string>7</string>
+```
+
+Optional direct n8n MCP injection:
+
+```xml
+<key>CLAUDE_PROXY_TOOLS_TRANSLATION</key><string>1</string>
+<key>CLAUDE_PROXY_MCP_ALLOW</key><string>n8n</string>
+<key>CLAUDE_PROXY_N8N_API_URL</key><string>https://n8n.example.com/api/v1</string>
+<key>CLAUDE_PROXY_N8N_API_KEY</key><string>&lt;n8n-api-key&gt;</string>
+<key>CLAUDE_PROXY_N8N_MCP_BIN</key><string>&lt;path-to-n8n-mcp&gt;</string>
+```
+
+Do not commit a real plist containing secrets.
+
+## Load and manage
+
+Load:
 
 ```bash
-# Load and start the service
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-code-provider.plist
-
-# Verify it's running
-launchctl list | grep claude-code
-curl http://localhost:3456/health
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist
 ```
 
-## Management Commands
+Verify:
 
 ```bash
-# Check status
-launchctl list | grep claude-code
-
-# Restart the service
-launchctl kickstart -k gui/$(id -u)/com.claude-code-provider
-
-# Stop the service (temporary)
-launchctl bootout gui/$(id -u)/com.claude-code-provider
-
-# Start the service again
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-code-provider.plist
-
-# View logs
-tail -f /tmp/claude-provider.log
-tail -f /tmp/claude-provider.err.log
+launchctl list | grep ai.openclaw.claude-proxy
+curl -s http://127.0.0.1:3456/health
 ```
 
-## Uninstall
+Restart:
 
 ```bash
-# Stop and remove the service
-launchctl bootout gui/$(id -u)/com.claude-code-provider
-rm ~/Library/LaunchAgents/com.claude-code-provider.plist
+launchctl kickstart -k gui/$(id -u)/ai.openclaw.claude-proxy
 ```
 
-## Troubleshooting
-
-### Service starts but health check fails
-
-Check the error log:
-```bash
-cat /tmp/claude-provider.err.log
-```
-
-Common issues:
-- Wrong path to `standalone.js`
-- `claude` CLI not in PATH
-- Node.js not found
-
-### Finding the right paths
+Unload:
 
 ```bash
-# Find node
-which node
-
-# Find claude
-which claude
-
-# Your home directory
-echo $HOME
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.claude-proxy.plist
 ```
+
+View logs:
+
+```bash
+tail -f ~/Library/Logs/claude-proxy.stdout.log
+tail -f ~/Library/Logs/claude-proxy.stderr.log
+```
+
+## Common pitfalls
+
+- LaunchAgents do not inherit your shell startup files. Put every required binary directory in `PATH`.
+- `claude auth login` must have been run by the same macOS user.
+- If `n8n-mcp` works in your terminal but not in the service, set `CLAUDE_PROXY_N8N_MCP_BIN` to its absolute path.
+- If stream-json breaks after a Claude CLI update, temporarily set `CLAUDE_PROXY_RUNTIME=print` and restart.
