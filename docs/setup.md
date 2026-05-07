@@ -18,7 +18,9 @@ claude auth login
 claude --version
 ```
 
-`claude-proxy` does not handle your Claude OAuth login itself. It launches the local `claude` CLI, so authentication must already work from the same user account that will run the proxy.
+**OAuth safety: `openclaw-claude-proxy` does not extract, read, copy, export, or store Claude Code OAuth tokens. It launches the official `claude` CLI in the background and lets Claude Code handle authentication the normal way, using the same local auth state Anthropic expects the CLI to use.**
+
+`claude-proxy` does not handle your Claude OAuth login itself. Authentication must already work from the same user account that will run the proxy.
 
 ## 2. Install openclaw-claude-proxy
 

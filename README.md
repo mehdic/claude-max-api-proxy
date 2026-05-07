@@ -4,6 +4,8 @@
 
 The installed executable remains `claude-proxy`. The proxy is designed for local developer and automation setups, especially [OpenClaw](https://github.com/openclaw/openclaw), but it also works with SDKs and tools that can point at an OpenAI-compatible base URL.
 
+> **OAuth safety: `openclaw-claude-proxy` does not extract, read, copy, export, or store Claude Code OAuth tokens. It launches the official `claude` CLI in the background and lets Claude Code handle authentication the normal way. In other words, the proxy uses Claude Code as Anthropic expects it to be used, instead of scraping credentials or reimplementing Anthropic's login flow.**
+
 ## Highlights
 
 - OpenAI-compatible Chat Completions and practical Responses API support.
@@ -42,13 +44,6 @@ npm install -g openclaw-claude-proxy
 claude-proxy
 ```
 
-
-GitHub release tarball alternative:
-
-```bash
-npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
-claude-proxy
-```
 
 ### Option B: build from source
 
@@ -116,6 +111,7 @@ Optional MCP injection (`CLAUDE_PROXY_TOOLS_TRANSLATION=1`) registers selected M
 
 ## Security notes
 
+- **OAuth safety: this proxy does not extract or store Claude Code OAuth tokens. Authentication remains owned by the official `claude` CLI and its normal local auth state.**
 - Keep the server bound to loopback unless you add your own authentication and network controls.
 - Do not commit API keys, OAuth tokens, local paths, LaunchAgent plists containing secrets, or trace databases.
 - Prefer environment variables, OS secret stores, or OpenClaw secret references for local secrets.
