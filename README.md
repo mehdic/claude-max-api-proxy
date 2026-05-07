@@ -105,7 +105,7 @@ As of the 2026-05-03 regression-hardening pass, the maintained branch has:
 - `npm run build` passing.
 - `npm test` passing with **265** tests.
 - `npm run failure:sim` passing.
-- Live LaunchAgent deployment on `ai.openclaw.claude-proxy` (`127.0.0.1:3456`) verified with `/health` returning `runtime: stream-json` and Claude CLI `2.1.104`.
+- Local LaunchAgent deployment (`127.0.0.1:3456`) verified with `/health` returning `runtime: stream-json` and Claude CLI `2.1.104`.
 - End-to-end OpenClaw behavior tested against the deployed build before merging to `main`.
 
 
@@ -179,7 +179,7 @@ curl -H 'X-Claude-Proxy-Runtime: print' …
 | `CLAUDE_PROXY_N8N_API_KEY` | unset | Optional. n8n API key (Settings → n8n API in n8n UI). Required alongside `CLAUDE_PROXY_N8N_API_URL`. |
 | `CLAUDE_PROXY_N8N_DETECTION_PATTERN` | `n8n.*\/webhook\/` | Optional regex (case-insensitive). Matched against claude's tool input to decide when an n8n call is in flight. Override if your webhook URLs don't contain "n8n". |
 | `CLAUDE_PROXY_TOOLS_TRANSLATION` | unset (off) | `1` to register openclaw-known MCP servers with the inner claude CLI via `--mcp-config` injection. Currently registers `n8n` if `CLAUDE_PROXY_N8N_API_URL` + `CLAUDE_PROXY_N8N_API_KEY` are set. The inner claude exposes them as `mcp__n8n__<tool>`. **Trade-off:** claude executes these tools internally — openclaw's audit / approval / per-agent allowlist do NOT see the calls. See "Tools translation modes" below. |
-| `CLAUDE_PROXY_N8N_MCP_BIN` | `n8n-mcp` | Override the path to the `n8n-mcp` binary if not at the default nvm location. |
+| `CLAUDE_PROXY_N8N_MCP_BIN` | `n8n-mcp` | Override the path to the `n8n-mcp` binary if it is not available on `PATH`. |
 | `CLAUDE_PROXY_TRACE_ENABLED` | unset (off) | `1` to enable the bounded in-memory trace store. Traces are accessible via `GET /traces` and `GET /traces/:id` (localhost-only). |
 | `CLAUDE_PROXY_TRACE_CAPACITY` | `200` | Max traces kept in memory. LRU eviction when capacity is exceeded. |
 | `CLAUDE_PROXY_TRACE_TTL_MS` | `3600000` (1 hour) | TTL per trace in milliseconds. Expired traces are evicted on access. Floor: 60,000 (1 min). |
