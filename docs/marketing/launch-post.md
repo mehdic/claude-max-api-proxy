@@ -9,7 +9,7 @@ It lets OpenAI-compatible clients talk to a local authenticated `claude` CLI ses
 Install:
 
 ```bash
-npm install -g openclaw-claude-proxy
+npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
 claude-proxy
 ```
 
@@ -34,7 +34,7 @@ What it supports:
 Install:
 
 ```bash
-npm install -g openclaw-claude-proxy
+npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
 claude-proxy
 ```
 

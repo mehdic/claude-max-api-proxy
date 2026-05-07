@@ -26,17 +26,17 @@ Choose one of the two supported install paths.
 
 ### Option A: prebuilt package
 
-This is the easiest path for users who only want to run the proxy. The npm package includes compiled `dist/` files, so it skips TypeScript and `npm run build`.
-
-```bash
-npm install -g openclaw-claude-proxy
-claude-proxy
-```
-
-GitHub release tarball alternative:
+This is the easiest path for users who only want to run the proxy. The GitHub release package includes compiled `dist/` files, so it skips TypeScript and `npm run build`.
 
 ```bash
 npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
+claude-proxy
+```
+
+Once the npm package is published, the shorter registry install will be:
+
+```bash
+npm install -g openclaw-claude-proxy
 claude-proxy
 ```
 

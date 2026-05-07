@@ -30,11 +30,18 @@ Then choose either the prebuilt package or a source checkout.
 ### Option A: install the prebuilt package
 
 ```bash
+npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
+claude-proxy
+```
+
+The GitHub release package includes the compiled `dist/` output, so users do not need TypeScript or `npm run build`. The executable command remains `claude-proxy`.
+Once the npm package is published, the shorter registry install will be:
+
+```bash
 npm install -g openclaw-claude-proxy
 claude-proxy
 ```
 
-The npm package includes the compiled `dist/` output, so users do not need TypeScript or `npm run build`. The executable command remains `claude-proxy`.
 
 GitHub release tarball alternative:
 
