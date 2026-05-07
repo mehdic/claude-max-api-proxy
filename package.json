@@ -1,7 +1,7 @@
 {
-  "name": "claude-proxy",
-  "version": "1.0.7",
-  "description": "Use your Claude Max subscription with any OpenAI-compatible client. Wraps Claude Code CLI as an OpenAI-compatible API server.",
+  "name": "openclaw-claude-proxy",
+  "version": "1.0.8",
+  "description": "OpenClaw-oriented local Claude Code proxy with OpenAI-compatible chat, responses, streaming, tools, traces, and release-ready packaging.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -35,13 +35,15 @@
     "oauth",
     "clawdbot",
     "llm",
-    "ai"
+    "ai",
+    "openclaw",
+    "claude-proxy"
   ],
-  "author": "Atal Ashutosh",
+  "author": "mehdic",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mehdic/openclaw-claude-proxy"
+    "url": "git+https://github.com/mehdic/openclaw-claude-proxy.git"
   },
   "bugs": {
     "url": "https://github.com/mehdic/openclaw-claude-proxy/issues"
