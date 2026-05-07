@@ -1,8 +1,8 @@
-# claude-proxy
+# openclaw-claude-proxy
 
-`claude-proxy` exposes the official Claude Code CLI as a local OpenAI-compatible HTTP server. It lets OpenAI-compatible clients talk to a local `claude` CLI session using familiar `/v1/chat/completions`, `/v1/responses`, `/v1/models`, streaming, usage, health, metrics, and tracing endpoints.
+`openclaw-claude-proxy` exposes the official Claude Code CLI as a local OpenAI-compatible HTTP server. It lets OpenAI-compatible clients talk to a local `claude` CLI session using familiar `/v1/chat/completions`, `/v1/responses`, `/v1/models`, streaming, usage, health, metrics, and tracing endpoints.
 
-The proxy is designed for local developer and automation setups, especially [OpenClaw](https://github.com/openclaw/openclaw), but it also works with SDKs and tools that can point at an OpenAI-compatible base URL.
+The installed executable remains `claude-proxy`. The proxy is designed for local developer and automation setups, especially [OpenClaw](https://github.com/openclaw/openclaw), but it also works with SDKs and tools that can point at an OpenAI-compatible base URL.
 
 ## Highlights
 

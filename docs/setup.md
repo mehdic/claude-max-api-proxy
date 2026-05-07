@@ -1,4 +1,4 @@
-# Setup guide
+# openclaw-claude-proxy setup guide
 
 This guide takes a clean machine from zero to a running local `claude-proxy` server.
 
@@ -20,7 +20,7 @@ claude --version
 
 `claude-proxy` does not handle your Claude OAuth login itself. It launches the local `claude` CLI, so authentication must already work from the same user account that will run the proxy.
 
-## 2. Install claude-proxy
+## 2. Install openclaw-claude-proxy
 
 Choose one of the two supported install paths.
 
