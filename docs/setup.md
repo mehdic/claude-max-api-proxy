@@ -22,14 +22,50 @@ claude --version
 
 ## 2. Install claude-proxy
 
+Choose one of the two supported install paths.
+
+### Option A: prebuilt release package
+
+This is the easiest path for users who only want to run the proxy. The release package includes compiled `dist/` files, so it skips TypeScript and `npm run build`.
+
+```bash
+npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.7/claude-proxy-1.0.7.tgz
+```
+
+Run it:
+
+```bash
+claude-proxy
+```
+
+If you download the file manually instead:
+
+```bash
+npm install -g ./claude-proxy-1.0.7.tgz
+claude-proxy
+```
+
+### Option B: source checkout
+
+Use this path if you want to develop, inspect, or modify the code.
+
 ```bash
 git clone https://github.com/mehdic/openclaw-claude-proxy.git
 cd openclaw-claude-proxy
 npm install
 npm run build
+npm start
 ```
 
 ## 3. Run in the foreground
+
+For the prebuilt global install:
+
+```bash
+claude-proxy
+```
+
+For a source checkout:
 
 ```bash
 npm start
@@ -40,13 +76,16 @@ By default the server binds to `127.0.0.1:3456`.
 Override the port with either an environment variable or a CLI argument:
 
 ```bash
+CLAUDE_PROXY_PORT=3457 claude-proxy
+
+# source checkout alternative
 CLAUDE_PROXY_PORT=3457 npm start
 
-# or
+# direct node alternative
 node dist/server/standalone.js 3457
 ```
 
-If both are supplied, the CLI argument wins.
+If a port CLI argument and `CLAUDE_PROXY_PORT` are both supplied, the CLI argument wins.
 
 ## 4. Smoke-test
 

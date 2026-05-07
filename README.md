@@ -18,10 +18,27 @@ The proxy is designed for local developer and automation setups, especially [Ope
 
 ## Quick start
 
+First install and authenticate Claude Code:
+
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude auth login
+```
 
+Then choose either the prebuilt release package or a source checkout.
+
+### Option A: install the prebuilt release package
+
+```bash
+npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.7/claude-proxy-1.0.7.tgz
+claude-proxy
+```
+
+This includes the compiled `dist/` output, so users do not need TypeScript or `npm run build`.
+
+### Option B: build from source
+
+```bash
 git clone https://github.com/mehdic/openclaw-claude-proxy.git
 cd openclaw-claude-proxy
 npm install

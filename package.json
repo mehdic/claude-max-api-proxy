@@ -75,6 +75,11 @@
     "docs",
     "scripts",
     "README.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "!dist/__tests__",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.js.map",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.d.ts.map"
   ]
 }
