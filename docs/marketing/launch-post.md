@@ -9,7 +9,7 @@ It lets OpenAI-compatible clients talk to a local authenticated `claude` CLI ses
 Install:
 
 ```bash
-npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
+npm install -g openclaw-claude-proxy
 claude-proxy
 ```
 
@@ -29,12 +29,12 @@ What it supports:
 - persistent `stream-json` runtime by default, with `print` fallback
 - caller-dispatched OpenAI tool calls, so the outer agent framework can keep approvals/audit/allowlists
 - optional MCP injection for trusted local setups
-- GitHub release tarballs and npm install path
+- published npm package and GitHub release tarballs
 
 Install:
 
 ```bash
-npm install -g https://github.com/mehdic/openclaw-claude-proxy/releases/download/v1.0.8/openclaw-claude-proxy-1.0.8.tgz
+npm install -g openclaw-claude-proxy
 claude-proxy
 ```
 
