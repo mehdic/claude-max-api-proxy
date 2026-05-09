@@ -9,6 +9,16 @@ import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
 import { acquireSubprocess } from "../subprocess/pool.js";
 import { acquireSession, returnSession, discardSession } from "../subprocess/session-pool.js";
+import { acquirePreInit } from "../subprocess/init-pool.js";
+import { StreamJsonSubprocess } from "../subprocess/stream-json-manager.js";
+import {
+  acquireStickySession,
+  stickyPoolCounters,
+  stickyPoolStats,
+  type StickyAcquireResult,
+  type StickyEvictionReason,
+} from "../subprocess/sticky-session-pool.js";
+import { resolveSessionOptions, isSessionOptionsError, type ResolvedSessionOptions, type SessionOptionsError } from "./sticky-options.js";
 import { extractModel, messagesToPrompt, openaiToCli } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
@@ -181,6 +191,49 @@ function setTraceHeader(res: Response, traceId: string): void {
   }
 }
 
+function sendSessionOptionsError(res: Response, err: SessionOptionsError): void {
+  if (!res.headersSent) {
+    res.status(err.status).json({
+      error: {
+        message: err.message,
+        type: "invalid_request_error",
+        code: err.code,
+      },
+    });
+  }
+}
+
+function recordSessionModeAccepted(mode: ResolvedSessionOptions["mode"]): void {
+  stickyPoolCounters.modeAccepted[mode]++;
+}
+
+function recordSessionModeRejected(mode: ResolvedSessionOptions["mode"] | "sticky"): void {
+  stickyPoolCounters.modeRejected[mode]++;
+}
+
+async function acquireStatelessStreamJson(model: string, disallowedTools: string[] = []): Promise<StreamJsonSubprocess> {
+  if (disallowedTools.length === 0) return acquirePreInit(model);
+  const subprocess = new StreamJsonSubprocess();
+  await subprocess.start({ model, disallowedTools });
+  return subprocess;
+}
+
+function isStickyBusyError(err: unknown): boolean {
+  return err instanceof Error && (err.message === "sticky_session_busy" || err.message === "sticky_session_capacity_busy");
+}
+
+function sendStickyBusy(res: Response, message = "Sticky session is busy"): void {
+  if (!res.headersSent) {
+    res.status(429).json({
+      error: {
+        message,
+        type: "rate_limit_error",
+        code: "sticky_session_busy",
+      },
+    });
+  }
+}
+
 /**
  * Handle POST /v1/chat/completions
  *
@@ -229,17 +282,47 @@ export async function handleChatCompletions(
       return;
     }
 
+    const sessionOptions = resolveSessionOptions(req);
+    if (isSessionOptionsError(sessionOptions)) {
+      tb.setError("invalid_request", sessionOptions.message);
+      tb.commit();
+      recordSessionModeRejected("sticky");
+      sendSessionOptionsError(res, sessionOptions);
+      return;
+    }
+    tb.setSessionMode(sessionOptions.mode);
+    recordSessionModeAccepted(sessionOptions.mode);
+
     const runtime = resolveRuntime(req);
     usedRuntime = runtime;
     tb.setRuntime(runtime);
+    if (sessionOptions.mode === "sticky" && runtime !== "stream-json") {
+      tb.setError("invalid_request", "Sticky sessions require the stream-json runtime");
+      tb.commit();
+      recordSessionModeRejected("sticky");
+      res.status(400).json({
+        error: {
+          message: "Sticky sessions require the stream-json runtime",
+          type: "invalid_request_error",
+          code: "sticky_requires_stream_json",
+        },
+      });
+      return;
+    }
     if (process.env.DEBUG) console.error(`[runtime] resolved=${runtime} req_id=${requestId}`);
 
     if (runtime === "stream-json") {
       const model = extractModel(body.model);
       try {
-        await handleStreamJsonRequest(req, res, model, body, requestId, stream, tb);
+        await handleStreamJsonRequest(req, res, model, body, requestId, stream, tb, sessionOptions);
         return;
       } catch (err) {
+        if (isStickyBusyError(err)) {
+          tb.setError("invalid_request", (err as Error).message);
+          tb.commit();
+          sendStickyBusy(res, (err as Error).message === "sticky_session_capacity_busy" ? "Sticky session pool is at capacity and all sessions are busy" : "Sticky session is busy");
+          return;
+        }
         const errClass = classifyAndRecordError(err);
         // Auto-fallback: only fires when CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE=1,
         // the failure is a recognized stream-layer fault, AND no SSE bytes
@@ -550,24 +633,61 @@ async function handleStreamJsonRequest(
   requestId: string,
   stream: boolean,
   tb: TraceBuilder,
+  sessionOptions: ResolvedSessionOptions = { mode: "pool" },
 ): Promise<void> {
   const cliInput = openaiToCli(body);
-  const acquired = await acquireSession(model, body.messages, { disallowedTools: cliInput.disallowedTools });
-  const subprocess = acquired.subprocess;
-  tb.setSessionWarmHit(acquired.isWarm);
-
   const bridgeTools = shouldBridgeExternalTools(body);
+
+  let subprocess: Awaited<ReturnType<typeof acquirePreInit>>;
+  let userText = cliInput.prompt;
+  let releaseSuccess: (assistantText: string) => void;
+  let releaseDiscard: (reason: StickyEvictionReason) => void;
+
+  if (sessionOptions.mode === "sticky" && sessionOptions.sticky) {
+    const sticky: StickyAcquireResult = await acquireStickySession({
+      sessionKeyHash: sessionOptions.sticky.keyHash,
+      sessionKeyHashShort: sessionOptions.sticky.keyHashShort,
+      ttlSeconds: sessionOptions.sticky.ttlSeconds,
+      reset: sessionOptions.sticky.reset,
+      model,
+      messages: body.messages,
+      bodyForPrompt: body,
+      disallowedTools: cliInput.disallowedTools,
+      sessionPolicy: sessionOptions.sticky.policy,
+    });
+    subprocess = sticky.subprocess;
+    userText = sticky.userText;
+    tb.setSessionWarmHit(sticky.isWarm);
+    tb.setStickySession({
+      hit: sticky.isStickyHit,
+      keyHash: sticky.keyHashShort,
+      ttlSeconds: sticky.ttlSeconds,
+      turnCount: sticky.turnCount,
+    });
+    releaseSuccess = (text) => sticky.release({ status: "success", assistantText: text });
+    releaseDiscard = (reason) => {
+      tb.setStickyEviction(reason);
+      sticky.release({ status: "discard", reason });
+    };
+  } else if (sessionOptions.mode === "stateless") {
+    subprocess = await acquireStatelessStreamJson(model, cliInput.disallowedTools);
+    tb.setSessionWarmHit(false);
+    releaseSuccess = () => subprocess.kill();
+    releaseDiscard = () => subprocess.kill();
+  } else {
+    const acquired = await acquireSession(model, body.messages, { disallowedTools: cliInput.disallowedTools });
+    subprocess = acquired.subprocess;
+    tb.setSessionWarmHit(acquired.isWarm);
+    const lastMessage = body.messages[body.messages.length - 1];
+    userText = acquired.isWarm
+      ? (bridgeTools ? messagesToPrompt([lastMessage], body) : acquired.lastUserText)
+      : cliInput.prompt;
+    releaseSuccess = (assistantText) => returnSession(subprocess, model, body.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
+    releaseDiscard = () => discardSession(subprocess);
+  }
+
   tb.setBridgeTools(bridgeTools, body);
   recordMcpGovernanceOnTrace(tb, subprocess, body);
-
-  // For warm path, send only the new user message; for cold, send the full
-  // flattened conversation as one user message. External tool requests need
-  // the bridge instruction block in both paths, so reuse messagesToPrompt for
-  // the warm last-turn prompt and openaiToCli's full prompt for cold turns.
-  const lastMessage = body.messages[body.messages.length - 1];
-  const userText = acquired.isWarm
-    ? (bridgeTools ? messagesToPrompt([lastMessage], body) : acquired.lastUserText)
-    : cliInput.prompt;
 
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
@@ -710,8 +830,7 @@ async function handleStreamJsonRequest(
     tb.setError("upstream_soft_dead", `upstream ${diag.reason}: silent for ${Math.round(diag.silenceMs / 1000)}s`);
     tb.commit();
 
-    subprocess.kill();
-    discardSession(subprocess);
+    releaseDiscard("watchdog");
 
     if (stream && !res.writableEnded) {
       const errMsg = `upstream ${diag.reason}: Claude CLI silent for ${Math.round(diag.silenceMs / 1000)}s`;
@@ -777,7 +896,7 @@ async function handleStreamJsonRequest(
   res.on("close", () => {
     if (!done) {
       console.error(`[StreamJson] client disconnected pre-completion req_id=${requestId} keepalives=${keepaliveCount} lastClientIdleMs=${Date.now() - lastClientActivityAt} lastClaudeIdleMs=${Date.now() - lastClaudeActivityAt}`);
-      discardSession(subprocess);
+      releaseDiscard("client_disconnect");
     }
   });
 
@@ -826,13 +945,13 @@ async function handleStreamJsonRequest(
       res.json(cliResultToOpenai(result, requestId, body));
     }
 
-    // Re-pool the subprocess for the next turn in this conversation.
-    returnSession(subprocess, model, body.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
+    // Re-pool or retain the subprocess for the next turn according to session mode.
+    releaseSuccess(assistantText);
   } catch (err) {
     // If the watchdog already fired and handled cleanup, skip duplicate work.
     if (watchdogFired) return;
     done = true;
-    discardSession(subprocess);
+    releaseDiscard("turn_error");
     const message = err instanceof Error ? err.message : "Unknown error";
     tb.setError(classifyError(err), message);
     tb.commit();
@@ -946,6 +1065,17 @@ export async function handleResponses(
       return;
     }
 
+    const sessionOptions = resolveSessionOptions(req);
+    if (isSessionOptionsError(sessionOptions)) {
+      tb.setError("invalid_request", sessionOptions.message);
+      tb.commit();
+      recordSessionModeRejected("sticky");
+      sendSessionOptionsError(res, sessionOptions);
+      return;
+    }
+    tb.setSessionMode(sessionOptions.mode);
+    recordSessionModeAccepted(sessionOptions.mode);
+
     setTraceHeader(res, traceId);
 
     // Translate Responses request → Chat Completions request
@@ -954,8 +1084,31 @@ export async function handleResponses(
 
     usedRuntime = resolveRuntime(req);
     tb.setRuntime(usedRuntime);
+    if (sessionOptions.mode === "sticky" && usedRuntime !== "stream-json") {
+      tb.setError("invalid_request", "Sticky sessions require the stream-json runtime");
+      tb.commit();
+      recordSessionModeRejected("sticky");
+      res.status(400).json({
+        error: {
+          message: "Sticky sessions require the stream-json runtime",
+          type: "invalid_request_error",
+          code: "sticky_requires_stream_json",
+        },
+      });
+      return;
+    }
     if (usedRuntime === "stream-json") {
-      await handleResponsesStreamJson(req, res, chatReq, requestId, body.model, stream, tb);
+      try {
+        await handleResponsesStreamJson(req, res, chatReq, requestId, body.model, stream, tb, sessionOptions);
+      } catch (err) {
+        if (isStickyBusyError(err)) {
+          tb.setError("invalid_request", (err as Error).message);
+          tb.commit();
+          sendStickyBusy(res, (err as Error).message === "sticky_session_capacity_busy" ? "Sticky session pool is at capacity and all sessions are busy" : "Sticky session is busy");
+          return;
+        }
+        throw err;
+      }
     } else if (stream) {
       await handleResponsesStreaming(req, res, chatReq, requestId, body.model, tb);
     } else {
@@ -987,13 +1140,60 @@ async function handleResponsesStreamJson(
   requestModel: string,
   stream: boolean,
   tb: TraceBuilder,
+  sessionOptions: ResolvedSessionOptions = { mode: "pool" },
 ): Promise<void> {
   const model = extractModel(chatReq.model);
   const cliInput = openaiToCli(chatReq);
-  const acquired = await acquireSession(model, chatReq.messages, { disallowedTools: cliInput.disallowedTools });
-  const subprocess = acquired.subprocess;
   const bridgeTools = shouldBridgeExternalTools(chatReq);
-  tb.setSessionWarmHit(acquired.isWarm);
+
+  let subprocess: Awaited<ReturnType<typeof acquirePreInit>>;
+  let userText = cliInput.prompt;
+  let releaseSuccess: (assistantText: string) => void;
+  let releaseDiscard: (reason: StickyEvictionReason) => void;
+
+  if (sessionOptions.mode === "sticky" && sessionOptions.sticky) {
+    const sticky = await acquireStickySession({
+      sessionKeyHash: sessionOptions.sticky.keyHash,
+      sessionKeyHashShort: sessionOptions.sticky.keyHashShort,
+      ttlSeconds: sessionOptions.sticky.ttlSeconds,
+      reset: sessionOptions.sticky.reset,
+      model,
+      messages: chatReq.messages,
+      bodyForPrompt: chatReq,
+      disallowedTools: cliInput.disallowedTools,
+      sessionPolicy: sessionOptions.sticky.policy,
+    });
+    subprocess = sticky.subprocess;
+    userText = sticky.userText;
+    tb.setSessionWarmHit(sticky.isWarm);
+    tb.setStickySession({
+      hit: sticky.isStickyHit,
+      keyHash: sticky.keyHashShort,
+      ttlSeconds: sticky.ttlSeconds,
+      turnCount: sticky.turnCount,
+    });
+    releaseSuccess = (text) => sticky.release({ status: "success", assistantText: text });
+    releaseDiscard = (reason) => {
+      tb.setStickyEviction(reason);
+      sticky.release({ status: "discard", reason });
+    };
+  } else if (sessionOptions.mode === "stateless") {
+    subprocess = await acquireStatelessStreamJson(model, cliInput.disallowedTools);
+    tb.setSessionWarmHit(false);
+    releaseSuccess = () => subprocess.kill();
+    releaseDiscard = () => subprocess.kill();
+  } else {
+    const acquired = await acquireSession(model, chatReq.messages, { disallowedTools: cliInput.disallowedTools });
+    subprocess = acquired.subprocess;
+    tb.setSessionWarmHit(acquired.isWarm);
+    const lastMessage = chatReq.messages[chatReq.messages.length - 1];
+    userText = acquired.isWarm
+      ? (bridgeTools ? messagesToPrompt([lastMessage], chatReq) : acquired.lastUserText)
+      : cliInput.prompt;
+    releaseSuccess = (assistantText) => returnSession(subprocess, model, chatReq.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
+    releaseDiscard = () => discardSession(subprocess);
+  }
+
   recordMcpGovernanceOnTrace(tb, subprocess, chatReq);
 
   const responseId = `resp_${requestId}`;
@@ -1034,14 +1234,10 @@ async function handleResponsesStreamJson(
   subprocess.on("assistant", onAssistant);
 
   res.on("close", () => {
-    if (!done) discardSession(subprocess);
+    if (!done) releaseDiscard("client_disconnect");
   });
 
   try {
-    const lastMessage = chatReq.messages[chatReq.messages.length - 1];
-    const userText = acquired.isWarm
-      ? (bridgeTools ? messagesToPrompt([lastMessage], chatReq) : acquired.lastUserText)
-      : cliInput.prompt;
     const result = await subprocess.submitTurn(userText);
     done = true;
     annotateAndRecordUsage(result, cliInput.model);
@@ -1057,7 +1253,7 @@ async function handleResponsesStreamJson(
     tb.commit();
 
     const assistantForPool = parsed.toolCalls.length > 0 ? rawText : parsed.textContent;
-    returnSession(subprocess, model, chatReq.messages, assistantForPool, { disallowedTools: cliInput.disallowedTools });
+    releaseSuccess(assistantForPool);
 
     if (stream && !res.writableEnded) {
       const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
@@ -1073,7 +1269,7 @@ async function handleResponsesStreamJson(
     }
   } catch (error) {
     done = true;
-    discardSession(subprocess);
+    releaseDiscard("turn_error");
     const message = error instanceof Error ? error.message : "Unknown error";
     tb.setError(classifyAndRecordError(error), message);
     tb.commit();
@@ -1337,6 +1533,7 @@ export async function handleHealth(_req: Request, res: Response): Promise<void> 
       error: capabilities.error,
     },
     pool: poolStats(),
+    sticky_pool: stickyPoolStats(),
     trace: traceStore.stats(),
     mcp: mcpGovernanceSummary(),
   });

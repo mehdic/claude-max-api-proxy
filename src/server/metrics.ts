@@ -16,6 +16,7 @@
 
 import type { Request, Response } from "express";
 import { poolCounters, poolStats } from "../subprocess/session-pool.js";
+import { stickyPoolCounters, stickyPoolStats, resetStickyPoolForTests } from "../subprocess/sticky-session-pool.js";
 import { fallbackCounters } from "./routes.js";
 import { defaultRuntime } from "../subprocess/runtime.js";
 import type { ClaudeTokenUsageBreakdown, UsageCostEstimate } from "./pricing.js";
@@ -208,6 +209,35 @@ export function renderMetrics(): string {
   lines.push("# TYPE claude_proxy_pool_cold_spawns_total counter");
   lines.push(`claude_proxy_pool_cold_spawns_total ${poolCounters.coldSpawns}`);
 
+  // claude_proxy_sticky_pool_* — explicit opt-in sticky session pool.
+  const stickyStats = stickyPoolStats();
+  lines.push("# HELP claude_proxy_sticky_pool_size Live workers in the opt-in sticky session pool.");
+  lines.push("# TYPE claude_proxy_sticky_pool_size gauge");
+  lines.push(`claude_proxy_sticky_pool_size{state="live"} ${stickyStats.size}`);
+  lines.push(`claude_proxy_sticky_pool_size{state="max"} ${stickyStats.max}`);
+  lines.push("# HELP claude_proxy_sticky_pool_enabled 1 when opt-in sticky sessions are enabled.");
+  lines.push("# TYPE claude_proxy_sticky_pool_enabled gauge");
+  lines.push(`claude_proxy_sticky_pool_enabled ${stickyStats.enabled ? 1 : 0}`);
+  lines.push("# HELP claude_proxy_sticky_session_hits_total Sticky requests served from an existing live Claude CLI session.");
+  lines.push("# TYPE claude_proxy_sticky_session_hits_total counter");
+  lines.push(`claude_proxy_sticky_session_hits_total ${stickyPoolCounters.hits}`);
+  lines.push("# HELP claude_proxy_sticky_session_cold_starts_total Sticky requests that created a new live Claude CLI session.");
+  lines.push("# TYPE claude_proxy_sticky_session_cold_starts_total counter");
+  lines.push(`claude_proxy_sticky_session_cold_starts_total ${stickyPoolCounters.coldStarts}`);
+  lines.push("# HELP claude_proxy_sticky_session_evictions_total Sticky session evictions by bounded reason.");
+  lines.push("# TYPE claude_proxy_sticky_session_evictions_total counter");
+  lines.push(`claude_proxy_sticky_session_evictions_total{reason="idle_ttl"} ${stickyPoolCounters.ttlEvictions}`);
+  lines.push(`claude_proxy_sticky_session_evictions_total{reason="absolute_ttl"} ${stickyPoolCounters.absoluteTtlEvictions}`);
+  lines.push(`claude_proxy_sticky_session_evictions_total{reason="lru"} ${stickyPoolCounters.lruEvictions}`);
+  lines.push(`claude_proxy_sticky_session_evictions_total{reason="unhealthy"} ${stickyPoolCounters.unhealthyEvictions}`);
+  lines.push(`claude_proxy_sticky_session_evictions_total{reason="fingerprint_mismatch"} ${stickyPoolCounters.fingerprintMismatches}`);
+  lines.push("# HELP claude_proxy_session_mode_total Requests accepted or rejected by explicit session mode.");
+  lines.push("# TYPE claude_proxy_session_mode_total counter");
+  for (const mode of ["pool", "sticky", "stateless"] as const) {
+    lines.push(`claude_proxy_session_mode_total{mode="${mode}",status="accepted"} ${stickyPoolCounters.modeAccepted[mode]}`);
+    lines.push(`claude_proxy_session_mode_total{mode="${mode}",status="rejected"} ${stickyPoolCounters.modeRejected[mode]}`);
+  }
+
   // claude_proxy_subprocess_spawn_failures_total
   lines.push("# HELP claude_proxy_subprocess_spawn_failures_total Failed claude subprocess spawns.");
   lines.push("# TYPE claude_proxy_subprocess_spawn_failures_total counter");
@@ -267,6 +297,7 @@ export function resetMetrics(): void {
   toolCallParseCounters.malformed = 0;
   toolCallParseCounters.rejected = 0;
   toolCallParseCounters.total_calls = 0;
+  resetStickyPoolForTests();
 }
 
 export function handleMetrics(_req: Request, res: Response): void {

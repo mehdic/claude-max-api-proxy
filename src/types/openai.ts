@@ -57,6 +57,7 @@ export interface OpenAIChatRequest {
   stream_options?: {
     include_usage?: boolean;
   };
+  claude_proxy?: ClaudeProxyRequestExtension;
 }
 
 export interface OpenAIChatResponseChoice {
@@ -164,6 +165,27 @@ export interface OpenAIError {
   };
 }
 
+export type ClaudeProxySessionMode = "pool" | "sticky" | "stateless";
+export type ClaudeProxySessionPolicy = "strict" | "compatible";
+
+export interface ClaudeProxyRequestExtension {
+  session_key?: string;
+  sessionKey?: string;
+  session?: string;
+  session_mode?: ClaudeProxySessionMode;
+  sessionMode?: ClaudeProxySessionMode;
+  mode?: ClaudeProxySessionMode;
+  session_ttl_seconds?: number | string;
+  sessionTtlSeconds?: number | string;
+  ttl_seconds?: number | string;
+  session_reset?: boolean | string | number;
+  sessionReset?: boolean | string | number;
+  reset?: boolean | string | number;
+  session_policy?: ClaudeProxySessionPolicy;
+  sessionPolicy?: ClaudeProxySessionPolicy;
+  policy?: ClaudeProxySessionPolicy;
+}
+
 // ── OpenAI Responses API types ──────────────────────────────────────
 
 export interface ResponsesInputTextPart {
@@ -194,6 +216,7 @@ export interface ResponsesRequest {
   instructions?: string;
   tools?: OpenAITool[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+  claude_proxy?: ClaudeProxyRequestExtension;
 }
 
 export interface ResponsesOutputMessageContent {

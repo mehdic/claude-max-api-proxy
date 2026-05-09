@@ -66,6 +66,62 @@ These variables affect the persistent `stream-json` runtime.
 | `CLAUDE_PROXY_UPSTREAM_SOFT_DEAD_MS` | code default | Soft-dead threshold for upstream silence detection. Usually leave unset. |
 | `CLAUDE_PROXY_DESCENDANT_GRACE_MS` | code default | Grace window for descendant/tool process handling. Usually leave unset. |
 
+## Opt-in sticky sessions
+
+Sticky sessions keep a specific live Claude Code CLI `stream-json` worker attached to an explicit caller-provided session key. This is useful for agent/conversation warm state, but it is deliberately opt-in: ordinary OpenAI-compatible requests continue through the default pool unchanged.
+
+Enable the feature explicitly:
+
+```bash
+CLAUDE_PROXY_STICKY_SESSIONS=1 npm start
+```
+
+Sticky sessions require the `stream-json` runtime. They preserve CLI continuity for the configured TTL; they do **not** change Anthropic prompt-cache lifetime guarantees.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CLAUDE_PROXY_STICKY_SESSIONS` | unset | Set `1` to allow opt-in sticky requests. Requests with a sticky key are rejected while disabled. |
+| `CLAUDE_PROXY_STICKY_ALLOW_BODY_OPTIONS` | enabled | Set `0` to ignore `claude_proxy` body extensions and accept only headers. |
+| `CLAUDE_PROXY_STICKY_DEFAULT_TTL_SECONDS` | `3600` | Sticky session idle TTL when a request does not provide one. |
+| `CLAUDE_PROXY_STICKY_MIN_TTL_SECONDS` | `60` | Lower clamp for request-provided sticky TTLs. |
+| `CLAUDE_PROXY_STICKY_MAX_TTL_SECONDS` | `86400` | Upper clamp for request-provided sticky TTLs. |
+| `CLAUDE_PROXY_STICKY_ABSOLUTE_TTL_SECONDS` | `86400` | Absolute session lifetime cap. Set `0` to disable the absolute cap. |
+| `CLAUDE_PROXY_STICKY_MAX_SESSIONS` | `8` | Maximum live sticky workers. Idle LRU workers are evicted when the cap is reached. |
+| `CLAUDE_PROXY_STICKY_QUEUE_TIMEOUT_MS` | `120000` | How long a concurrent request waits for the same sticky key before returning busy. |
+| `CLAUDE_PROXY_STICKY_KEY_MAX_LENGTH` | `256` | Maximum raw session key length. Raw keys are hashed in traces/metrics. |
+
+Header form:
+
+```text
+X-Claude-Proxy-Session-Key: app:user:conversation
+X-Claude-Proxy-Session-Mode: sticky
+X-Claude-Proxy-Session-TTL-Seconds: 86400
+X-Claude-Proxy-Session-Reset: false
+```
+
+Body extension form:
+
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [{ "role": "user", "content": "hello" }],
+  "claude_proxy": {
+    "session_key": "app:user:conversation",
+    "session_mode": "sticky",
+    "session_ttl_seconds": 86400,
+    "session_reset": false
+  }
+}
+```
+
+Accepted session modes are:
+
+- `pool` — default behavior; no sticky key required.
+- `sticky` — opt into the sticky worker keyed by the supplied session key plus model/tool/runtime fingerprint.
+- `stateless` — bypasses reusable conversation pooling for this request.
+
+Headers override body extension fields when both are present.
+
 ## Models
 
 The proxy exposes current Claude model ids through `/models` and `/v1/models`. Common ids include:

@@ -69,8 +69,14 @@ export interface TraceRecord {
   // MCP governance
   mcpDecisions: TraceMcpDecision[];
 
-  // Session pool
+  // Session / worker reuse
+  sessionMode?: "pool" | "sticky" | "stateless";
   sessionWarmHit?: boolean;
+  stickySessionHit?: boolean;
+  stickySessionKeyHash?: string;
+  stickyTtlSeconds?: number;
+  stickyTurnCount?: number;
+  stickyEvictionReason?: string;
 }
 
 /**

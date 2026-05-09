@@ -37,7 +37,10 @@ export interface TraceBuilder {
   setUsage(opts: { promptTokens?: number; responseTokens?: number; cacheReadTokens?: number }): void;
   setError(cls: ProtocolErrorClass, message?: string): void;
   setFallback(reason: string): void;
+  setSessionMode(mode: "pool" | "sticky" | "stateless"): void;
   setSessionWarmHit(warm: boolean): void;
+  setStickySession(opts: { hit: boolean; keyHash: string; ttlSeconds: number; turnCount: number }): void;
+  setStickyEviction(reason: string): void;
   setToolCallParseSource(source: "result_text" | "buffered_text"): void;
   commit(): void;
 }
@@ -125,7 +128,17 @@ export function createTraceBuilder(init: TraceBuilderInit): TraceBuilder {
       record.fallbackReason = reason;
     },
 
+    setSessionMode(mode) { record.sessionMode = mode; },
     setSessionWarmHit(warm) { record.sessionWarmHit = warm; },
+
+    setStickySession(opts) {
+      record.stickySessionHit = opts.hit;
+      record.stickySessionKeyHash = opts.keyHash.slice(0, 12);
+      record.stickyTtlSeconds = opts.ttlSeconds;
+      record.stickyTurnCount = opts.turnCount;
+    },
+
+    setStickyEviction(reason) { record.stickyEvictionReason = reason.slice(0, 80); },
     setToolCallParseSource(source) { record.toolCallParseSource = source; },
 
     commit() {
