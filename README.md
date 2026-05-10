@@ -16,6 +16,7 @@ The installed executable remains `claude-proxy`. The proxy is designed for local
 - Optional direct MCP injection for advanced local setups.
 - Optional n8n-aware progress keepalives.
 - Optional in-memory, SQLite, and HTTP-exported traces with redaction boundaries.
+- Optional sticky Claude CLI sessions for callers that pass deterministic session metadata.
 - macOS LaunchAgent-friendly standalone server.
 
 ## Quick start
@@ -75,7 +76,7 @@ No proxy API key is required by default. Authentication is whatever the local `c
 
 - [Setup guide](docs/setup.md) — install, run, smoke-test, macOS LaunchAgent, updates, and troubleshooting.
 - [Configuration guide](docs/configuration.md) — runtime modes, environment variables, tracing, MCP, n8n, monitoring, and local secret handling.
-- [OpenClaw integration guide](docs/openclaw-integration.md) — provider/model/agent configuration, tool modes, and safety notes.
+- [OpenClaw integration guide](docs/openclaw-integration.md) — provider/model/agent configuration, sticky-session bridge setup, tool modes, and safety notes.
 - [Trace security](docs/TRACE_SECURITY.md) — trace contents, redaction, access controls, and retention.
 - [macOS LaunchAgent reference](docs/macos-setup.md) — focused plist example.
 
@@ -102,6 +103,29 @@ Two Claude subprocess strategies are available:
 - `print` — incident-response fallback. Spawns a fresh `claude --print` subprocess per request. Slower, but simpler and isolated.
 
 See [Configuration](docs/configuration.md#runtime) for details.
+
+## Sticky sessions
+
+Sticky sessions are an opt-in extension on top of the normal OpenAI-compatible API. A request with no sticky metadata keeps the default pool behavior. A caller that wants stable live Claude CLI continuity sends deterministic session headers:
+
+```text
+X-Claude-Proxy-Session-Key: <caller-chosen-stable-id>
+X-Claude-Proxy-Session-Mode: sticky
+X-Claude-Proxy-Session-TTL-Seconds: 86400
+X-Claude-Proxy-Session-Policy: compatible
+```
+
+Equivalent body options are also supported under `claude_proxy` when body options are enabled. The proxy hashes the raw key for logs/metrics; do not put secrets in the key.
+
+Enable the server-side feature explicitly:
+
+```bash
+CLAUDE_PROXY_STICKY_SESSIONS=1
+CLAUDE_PROXY_STICKY_MAX_SESSIONS=8
+CLAUDE_PROXY_STICKY_DEFAULT_TTL_SECONDS=86400
+```
+
+For OpenClaw, use the local `claude-proxy-sticky` provider plugin plus the OpenAI-compatible Gateway patches described in [OpenClaw integration](docs/openclaw-integration.md#4-sticky-sessions-for-openclaw). Mehdi's installed-Gateway patch ledger lives at `/Users/mehdichaouachi/.openclaw/workspace/memory/infra/openclaw-gateway-patches.md`. OpenClaw remains the transcript source of truth; sticky sessions only keep the live Claude CLI worker warm/continuous for the chosen session key.
 
 ## Tool execution model
 

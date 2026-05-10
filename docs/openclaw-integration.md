@@ -113,7 +113,112 @@ For a specific agent, set the primary model and keep at least one non-proxy fall
 
 Keeping a fallback prevents a proxy outage, Claude CLI auth issue, or local service restart from taking the agent completely offline.
 
-## 4. Restart or reload OpenClaw
+## 4. Sticky sessions for OpenClaw
+
+This step is optional but recommended for OpenClaw agent traffic. It gives each OpenClaw session a deterministic sticky Claude CLI worker while preserving normal OpenAI-compatible behavior for clients that do not send sticky metadata.
+
+### 4.1 Enable sticky sessions in claude-proxy
+
+Set these in the service environment or LaunchAgent plist:
+
+```bash
+CLAUDE_PROXY_STICKY_SESSIONS=1
+CLAUDE_PROXY_STICKY_MAX_SESSIONS=8
+CLAUDE_PROXY_STICKY_DEFAULT_TTL_SECONDS=86400
+```
+
+Restart `claude-proxy` after changing its service environment, then verify:
+
+```bash
+curl -s http://127.0.0.1:3456/health | jq '.sticky_pool'
+curl -s http://127.0.0.1:3456/metrics | grep claude_proxy_sticky_pool_enabled
+```
+
+Expected metric when enabled:
+
+```text
+claude_proxy_sticky_pool_enabled 1
+```
+
+### 4.2 Add the OpenClaw provider hook plugin
+
+Create a local OpenClaw plugin such as:
+
+```text
+~/.openclaw/plugins/claude-proxy-sticky/
+  openclaw.plugin.json
+  package.json
+  index.js
+```
+
+The plugin should register provider id `claude-proxy` and implement `resolveTransportTurnState(ctx)`. The hook returns headers like:
+
+```text
+X-Claude-Proxy-Session-Key: openclaw:claude-proxy:<model-id>:<openclaw-session-id>
+X-Claude-Proxy-Session-Mode: sticky
+X-Claude-Proxy-Session-TTL-Seconds: 86400
+X-Claude-Proxy-Session-Policy: compatible
+X-OpenClaw-Session-Id: <openclaw-session-id>
+X-OpenClaw-Turn-Id: <turn-id>
+X-OpenClaw-Turn-Attempt: <attempt>
+```
+
+Recommended key shape:
+
+```text
+openclaw:<provider>:<model>:<session-id>
+```
+
+Keep the key deterministic, non-secret, and under the proxy key length limit. If a session id is missing, use a harmless fallback such as `default`; do not use random values or every request will create a new sticky slot.
+
+Enable the plugin in OpenClaw config:
+
+```json
+{
+  "plugins": {
+    "load": {
+      "paths": [
+        "/Users/mehdichaouachi/.openclaw/plugins/claude-proxy-sticky"
+      ]
+    },
+    "allow": [
+      "claude-proxy-sticky"
+    ],
+    "entries": {
+      "claude-proxy-sticky": {
+        "enabled": true,
+        "config": {
+          "ttlSeconds": 86400,
+          "policy": "compatible",
+          "keyPrefix": "openclaw"
+        }
+      }
+    }
+  }
+}
+```
+
+If your install uses the persisted plugin registry, ensure `~/.openclaw/plugins/installs.json` contains the local `claude-proxy-sticky` entry. In Mehdi's deployment this was refreshed directly in the registry file.
+
+### 4.3 Ensure OpenClaw's OpenAI-compatible transport forwards turn headers
+
+OpenClaw provider hooks only help if the active transport attaches `ProviderTransportTurnState.headers` to the HTTP request. In OpenClaw 2026.5.6, the Responses transport already did this, but the Chat Completions / `openai-completions` transport did not.
+
+For `claude-proxy` configured as `api: "openai-completions"`, patch or upgrade OpenClaw so its OpenAI completions client path:
+
+1. calls provider `resolveTransportTurnState` with `options.sessionId`, a stable turn id, attempt number, and `transport: "stream"`;
+2. passes `turnState.headers` into the OpenAI client default headers;
+3. does **not** add sticky metadata to the JSON payload unless you intentionally choose the body extension.
+
+Mehdi's local Gateway patch ledger, including Cassius's OpenAI Completions turn-header patch and Reaper's later boundary-aware stream-selection patch for `streamStrategy: session-custom`, is documented at:
+
+```text
+/Users/mehdichaouachi/.openclaw/workspace/memory/infra/openclaw-gateway-patches.md
+```
+
+Without both Gateway behaviors, the plugin can calculate sticky headers but live OpenClaw traffic may still reach `claude-proxy` as ordinary pooled OpenAI-compatible calls.
+
+## 5. Restart or reload OpenClaw
 
 Use the normal OpenClaw config reload/restart path for your installation. Then verify:
 
@@ -123,7 +228,7 @@ curl -s http://127.0.0.1:3456/health | jq .
 
 In OpenClaw, confirm the `claude-proxy/...` models appear in the model picker or status output for the relevant agent.
 
-## 5. Send a test request through OpenClaw
+## 6. Send a test request through OpenClaw
 
 A good first test is a short, non-tool prompt:
 
