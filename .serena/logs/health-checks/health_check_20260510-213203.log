@@ -1,0 +1,88 @@
+INFO  2026-05-10 21:32:03,653 serena.cli:health_check:920 - Starting health check for project: /Users/mehdichaouachi/.openclaw/projects/claude-proxy
+INFO  2026-05-10 21:32:03,653 serena.util.file_system:_load_gitignore_files:152 - Processing .gitignore file: /Users/mehdichaouachi/.openclaw/projects/claude-proxy/.serena/.gitignore
+INFO  2026-05-10 21:32:03,654 serena.cli:health_check:924 - Creating SerenaAgent with disabled dashboard...
+INFO  2026-05-10 21:32:03,657 serena.util.file_system:stop:336 - Loading of .gitignore files completed in 0.003 seconds
+INFO  2026-05-10 21:32:03,657 serena.project:stop:336 - Gathering ignore spec for project claude-proxy completed in 0.004 seconds
+INFO  2026-05-10 21:32:03,675 serena.agent:__init__:589 - Will record tool usage statistics with token count estimator: CHAR_COUNT.
+INFO  2026-05-10 21:32:03,683 serena.agent:__init__:593 - Starting Serena server (version=1.2.0, process id=81072, parent process id=81071; language backend=LSP); Python version=3.13.12, platform=macOS-26.3-arm64-arm-64bit-Mach-O
+INFO  2026-05-10 21:32:03,684 serena.agent:__init__:597 - Configuration file: /Users/mehdichaouachi/.serena/serena_config.yml
+INFO  2026-05-10 21:32:03,684 serena.agent:__init__:598 - Available projects: .openclaw, claude-proxy, openclaw-serena-smoke
+INFO  2026-05-10 21:32:03,684 serena.agent:__init__:599 - Loaded tools (46): read_file, create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern, restart_language_server, get_symbols_overview, find_symbol, find_referencing_symbols, replace_symbol_body, insert_after_symbol, insert_before_symbol, rename_symbol, safe_delete_symbol, write_memory, read_memory, list_memories, delete_memory, rename_memory, edit_memory, execute_shell_command, open_dashboard, activate_project, remove_project, get_current_config, check_onboarding_performed, onboarding, initial_instructions, serena_info, jet_brains_find_symbol, jet_brains_move, jet_brains_safe_delete, jet_brains_inline_symbol, jet_brains_find_referencing_symbols, jet_brains_get_symbols_overview, jet_brains_type_hierarchy, jet_brains_find_declaration, jet_brains_find_implementations, jet_brains_rename, jet_brains_debug, list_queryable_projects, query_project
+INFO  2026-05-10 21:32:03,684 serena.agent:__init__:611 - Using language backend from global configuration: LSP
+INFO  2026-05-10 21:32:03,693 serena.config.serena_config:start:329 - Loading project instance for RegisteredProject[project_root=/Users/mehdichaouachi/.openclaw/projects/claude-proxy, project_config=ProjectConfig[project_name=claude-proxy]] starting ...
+INFO  2026-05-10 21:32:03,693 serena.project:__init__:281 - Serena project data folder: /Users/mehdichaouachi/.openclaw/projects/claude-proxy/.serena
+INFO  2026-05-10 21:32:03,693 serena.project:start:329 - Gathering ignore spec for project claude-proxy starting ...
+INFO  2026-05-10 21:32:03,693 serena.config.serena_config:stop:336 - Loading project instance for RegisteredProject[project_root=/Users/mehdichaouachi/.openclaw/projects/claude-proxy, project_config=ProjectConfig[project_name=claude-proxy]] completed in 0.000 seconds
+INFO  2026-05-10 21:32:03,693 serena.util.file_system:start:329 - Loading of .gitignore files starting ...
+INFO  2026-05-10 21:32:03,693 serena.agent:activate_project_from_path_or_name:1127 - Found registered project 'claude-proxy' at path /Users/mehdichaouachi/.openclaw/projects/claude-proxy
+INFO  2026-05-10 21:32:03,693 serena.agent:_activate_project:1064 - Activating claude-proxy at /Users/mehdichaouachi/.openclaw/projects/claude-proxy
+INFO  2026-05-10 21:32:03,693 serena.task_executor:issue_task:192 - Scheduling Task-1:init_language_server_manager
+INFO  2026-05-10 21:32:03,693 serena.util.file_system:_load_gitignore_files:152 - Processing .gitignore file: /Users/mehdichaouachi/.openclaw/projects/claude-proxy/.gitignore
+INFO  2026-05-10 21:32:03,693 serena.agent:_update_active_modes:993 - Active modes (2): editing, interactive
+INFO  2026-05-10 21:32:03,693 serena.util.file_system:_load_gitignore_files:152 - Processing .gitignore file: /Users/mehdichaouachi/.openclaw/projects/claude-proxy/.serena/.gitignore
+INFO  2026-05-10 21:32:03,695 serena.agent:_create_base_toolset:754 - Number of exposed tools: 26
+INFO  2026-05-10 21:32:03,695 serena.agent:__init__:635 - Number of exposed tools: 26. Exposed tools: ['activate_project', 'check_onboarding_performed', 'create_text_file', 'delete_memory', 'edit_memory', 'execute_shell_command', 'find_file', 'find_referencing_symbols', 'find_symbol', 'get_current_config', 'get_symbols_overview', 'initial_instructions', 'insert_after_symbol', 'insert_before_symbol', 'list_dir', 'list_memories', 'onboarding', 'read_file', 'read_memory', 'rename_memory', 'rename_symbol', 'replace_content', 'replace_symbol_body', 'safe_delete_symbol', 'search_for_pattern', 'write_memory']
+INFO  2026-05-10 21:32:03,696 serena.agent:_update_active_tools:1011 - Active tools (26): activate_project, check_onboarding_performed, create_text_file, delete_memory, edit_memory, execute_shell_command, find_file, find_referencing_symbols, find_symbol, get_current_config, get_symbols_overview, initial_instructions, insert_after_symbol, insert_before_symbol, list_dir, list_memories, onboarding, read_file, read_memory, rename_memory, rename_symbol, replace_content, replace_symbol_body, safe_delete_symbol, search_for_pattern, write_memory
+INFO  2026-05-10 21:32:03,696 serena.util.file_system:stop:336 - Loading of .gitignore files completed in 0.003 seconds
+INFO  2026-05-10 21:32:03,696 serena.project:stop:336 - Gathering ignore spec for project claude-proxy completed in 0.004 seconds
+INFO  2026-05-10 21:32:03,861 serena.cli:health_check:927 - SerenaAgent created successfully
+INFO  2026-05-10 21:32:03,861 serena.cli:health_check:930 - Searching for analyzable files...
+INFO  2026-05-10 21:32:03,869 serena.cli:health_check:939 - Found analyzable file: scripts/failure-sim.mjs
+INFO  2026-05-10 21:32:03,869 serena.cli:health_check:957 - Testing GetSymbolsOverviewTool on file: scripts/failure-sim.mjs
+INFO  2026-05-10 21:32:03,869 serena.task_executor:issue_task:192 - Scheduling Task-2:<lambda>
+INFO  2026-05-10 21:32:03,889 serena.task_executor:_process_task_queue:123 - Starting execution of Task-1:init_language_server_manager
+INFO  2026-05-10 21:32:03,890 serena.task_executor:start:329 - Task-1:init_language_server_manager starting ...
+INFO  2026-05-10 21:32:03,890 serena.agent:start:329 - Language server initialization starting ...
+INFO  2026-05-10 21:32:03,890 serena.project:create_language_server_manager:653 - Creating language server manager for /Users/mehdichaouachi/.openclaw/projects/claude-proxy
+INFO  2026-05-10 21:32:03,890 sensai.util.logging:start:329 - Language server startup (language=typescript) starting ...
+INFO  2026-05-10 21:32:03,891 serena.ls_manager:create_language_server:48 - Creating language server instance for /Users/mehdichaouachi/.openclaw/projects/claude-proxy, language=typescript.
+INFO  2026-05-10 21:32:03,945 solidlsp.language_servers.typescript_language_server:_get_or_install_core_dependency:187 - Typescript Language Server executable not found at /Users/mehdichaouachi/.serena/language_servers/static/TypeScriptLanguageServer/ts-lsp/node_modules/.bin/typescript-language-server.
+INFO  2026-05-10 21:32:03,945 solidlsp.language_servers.typescript_language_server:_get_or_install_core_dependency:203 - Installing TypeScript Language Server dependencies...
+INFO  2026-05-10 21:32:03,945 solidlsp.language_servers.typescript_language_server:start:329 - Installation of TypeScript language server dependencies starting ...
+INFO  2026-05-10 21:32:03,953 solidlsp.language_servers.common:_run_command:115 - Running command 'npm install --prefix ./ typescript@5.9.3' in '/Users/mehdichaouachi/.serena/language_servers/static/TypeScriptLanguageServer/ts-lsp'
+INFO  2026-05-10 21:32:04,665 solidlsp.language_servers.common:_run_command:131 - Command completed successfully
+INFO  2026-05-10 21:32:04,669 solidlsp.language_servers.common:_run_command:115 - Running command 'npm install --prefix ./ typescript-language-server@5.1.3' in '/Users/mehdichaouachi/.serena/language_servers/static/TypeScriptLanguageServer/ts-lsp'
+INFO  2026-05-10 21:32:05,704 solidlsp.language_servers.common:_run_command:131 - Command completed successfully
+INFO  2026-05-10 21:32:05,705 solidlsp.language_servers.typescript_language_server:stop:336 - Installation of TypeScript language server dependencies completed in 1.760 seconds
+INFO  2026-05-10 21:32:05,706 solidlsp.language_servers.typescript_language_server:_get_or_install_core_dependency:209 - TypeScript language server dependencies installed successfully
+INFO  2026-05-10 21:32:05,706 solidlsp.ls:start:2578 - Starting language server with language typescript for /Users/mehdichaouachi/.openclaw/projects/claude-proxy
+INFO  2026-05-10 21:32:05,706 solidlsp.language_servers.typescript_language_server:_start_server:358 - Starting TypeScript server process
+INFO  2026-05-10 21:32:05,707 solidlsp.ls_process:start:192 - Starting language server process via command: ['/Users/mehdichaouachi/.serena/language_servers/static/TypeScriptLanguageServer/ts-lsp/node_modules/.bin/typescript-language-server', '--stdio']
+INFO  2026-05-10 21:32:05,712 solidlsp.language_servers.typescript_language_server:_start_server:362 - Sending initialize request from LSP client to LSP server and awaiting response
+INFO  2026-05-10 21:32:06,091 solidlsp.language_servers.typescript_language_server:window_log_message:296 - LSP: window/logMessage: {'type': 3, 'message': 'Using Typescript version (workspace) 5.9.3 from path "/Users/mehdichaouachi/.openclaw/projects/claude-proxy/node_modules/typescript/lib/tsserver.js"'}
+INFO  2026-05-10 21:32:06,091 solidlsp.language_servers.typescript_language_server:handle_typescript_version:304 - TypeScript server version notification received: {'version': '5.9.3', 'source': 'workspace'}
+INFO  2026-05-10 21:32:06,091 solidlsp.language_servers.typescript_language_server:_start_server:377 - TypeScript server is ready
+INFO  2026-05-10 21:32:06,091 solidlsp.language_servers.typescript_language_server:_start_server:387 - Waiting for TypeScript project indexing to complete (if async)...
+INFO  2026-05-10 21:32:06,091 solidlsp.language_servers.typescript_language_server:_start_server:389 - TypeScript project indexing complete
+INFO  2026-05-10 21:32:06,091 sensai.util.logging:stop:336 - Language server startup (language=typescript) completed in 2.201 seconds
+INFO  2026-05-10 21:32:06,091 serena.agent:stop:336 - Language server initialization completed in 2.201 seconds
+INFO  2026-05-10 21:32:06,091 serena.task_executor:stop:336 - Task-1:init_language_server_manager completed in 2.201 seconds
+INFO  2026-05-10 21:32:06,091 serena.task_executor:_process_task_queue:123 - Starting execution of Task-2:<lambda>
+INFO  2026-05-10 21:32:06,091 serena.task_executor:start:329 - Task-2:<lambda> starting ...
+INFO  2026-05-10 21:32:06,269 solidlsp.language_servers.typescript_language_server:progress_handler:333 - TypeScript LSP progress [049526f1-5446-423e-b1c9-b476116e59c6]: started - Initializing JS/TS language features…
+INFO  2026-05-10 21:32:06,461 serena.task_executor:stop:336 - Task-2:<lambda> completed in 0.370 seconds
+INFO  2026-05-10 21:32:06,461 serena.cli:health_check:959 - GetSymbolsOverviewTool returned: [{'name': 'BASE_URL', 'kind': 'Constant'}, {'name': 'err', 'kind': 'Variable'}, {'name': 'invalidRequest', 'kind': 'Function'}, {'name': 'log', 'kind': 'Function'}, {'name': 'malformedToolAttempt', 'kind': 'Function'}, {'name': 'MODEL', 'kind': 'Constant'}, {'name': 'streamAbort', 'kind': 'Function'}, {'name': 'TIMEOUT_MS', 'kind': 'Constant'}]
+INFO  2026-05-10 21:32:06,461 serena.cli:health_check:982 - Using symbol for testing: invalidRequest (kind: Function)
+INFO  2026-05-10 21:32:06,461 serena.cli:health_check:985 - Testing FindSymbolTool for symbol: invalidRequest
+INFO  2026-05-10 21:32:06,461 serena.task_executor:issue_task:192 - Scheduling Task-3:<lambda>
+INFO  2026-05-10 21:32:06,647 solidlsp.language_servers.typescript_language_server:progress_handler:344 - TypeScript LSP progress [049526f1-5446-423e-b1c9-b476116e59c6]: ended - 
+INFO  2026-05-10 21:32:06,711 serena.task_executor:_process_task_queue:123 - Starting execution of Task-3:<lambda>
+INFO  2026-05-10 21:32:06,711 serena.task_executor:start:329 - Task-3:<lambda> starting ...
+INFO  2026-05-10 21:32:06,712 serena.task_executor:stop:336 - Task-3:<lambda> completed in 0.001 seconds
+INFO  2026-05-10 21:32:06,712 serena.cli:health_check:990 - FindSymbolTool found 1 matches for symbol invalidRequest
+INFO  2026-05-10 21:32:06,712 serena.cli:health_check:993 - Testing FindReferencingSymbolsTool for symbol: invalidRequest
+INFO  2026-05-10 21:32:06,712 serena.task_executor:issue_task:192 - Scheduling Task-4:<lambda>
+INFO  2026-05-10 21:32:06,833 serena.task_executor:_process_task_queue:123 - Starting execution of Task-4:<lambda>
+INFO  2026-05-10 21:32:06,833 serena.task_executor:start:329 - Task-4:<lambda> starting ...
+WARNING 2026-05-10 21:32:09,012 solidlsp.ls:request_referencing_symbols:1880 - Could not find containing symbol for scripts/failure-sim.mjs:76:8. Returning file symbol instead
+INFO  2026-05-10 21:32:09,013 serena.task_executor:stop:336 - Task-4:<lambda> completed in 2.181 seconds
+INFO  2026-05-10 21:32:09,014 serena.cli:health_check:997 - FindReferencingSymbolsTool found 1 references for symbol invalidRequest
+INFO  2026-05-10 21:32:09,014 serena.cli:health_check:1003 - Testing SearchForPatternTool for pattern: invalidRequest
+INFO  2026-05-10 21:32:09,014 serena.task_executor:issue_task:192 - Scheduling Task-5:<lambda>
+INFO  2026-05-10 21:32:09,126 serena.task_executor:_process_task_queue:123 - Starting execution of Task-5:<lambda>
+INFO  2026-05-10 21:32:09,126 serena.task_executor:start:329 - Task-5:<lambda> starting ...
+INFO  2026-05-10 21:32:09,145 serena.util.text_utils:search_files:364 - Processing 65 files.
+INFO  2026-05-10 21:32:09,191 serena.util.text_utils:search_files:405 - Found 2 total matches across 65 files
+INFO  2026-05-10 21:32:09,191 serena.task_executor:stop:336 - Task-5:<lambda> completed in 0.065 seconds
+INFO  2026-05-10 21:32:09,191 serena.cli:health_check:1010 - SearchForPatternTool found 2 pattern matches for invalidRequest
+INFO  2026-05-10 21:32:09,192 serena.cli:health_check:1024 - Health check completed successfully
