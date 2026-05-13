@@ -11,7 +11,9 @@
 import { spawn } from "node:child_process";
 
 const BASE_URL = process.env.CLAUDE_PROXY_MONITOR_BASE_URL || "http://127.0.0.1:3456";
-const MODEL = process.env.CLAUDE_PROXY_MONITOR_MODEL || "claude-haiku-4-5-20251001";
+// Keep the monitor on the current stable Sonnet 4.6 alias. Haiku aliases can
+// initialize successfully but intermittently hang this tiny non-streaming smoke request.
+const MODEL = process.env.CLAUDE_PROXY_MONITOR_MODEL || "claude-sonnet-4-6";
 const TIMEOUT_MS = Number(process.env.CLAUDE_PROXY_MONITOR_TIMEOUT_MS || 60_000);
 const ALERT_COMMAND = process.env.CLAUDE_PROXY_MONITOR_ALERT_COMMAND || "";
 
@@ -55,13 +57,13 @@ async function main() {
   const content = chat.choices?.[0]?.message?.content;
   if (!content) throw new Error("smoke chat returned no content");
 
-  console.log(JSON.stringify({ ok: true, baseUrl: BASE_URL, runtime: health.runtime, model: chat.model || MODEL, trace: chat.trace_id || null }));
+  console.log(JSON.stringify({ ok: true, baseUrl: BASE_URL, runtime: health.runtime, model: MODEL, responseModel: chat.model || null, trace: chat.trace_id || null }));
 }
 
 try {
   await main();
 } catch (err) {
-  const msg = `⚠️ Claude Proxy monitor failed on ${BASE_URL}: ${err instanceof Error ? err.message : String(err)}`;
+  const msg = `⚠️ Claude Proxy monitor failed on ${BASE_URL} using ${MODEL}: ${err instanceof Error ? err.message : String(err)}`;
   console.error(msg);
   await alert(msg);
   process.exitCode = 1;
