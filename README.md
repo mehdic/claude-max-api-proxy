@@ -11,6 +11,7 @@ The installed executable remains `claude-proxy`. The proxy is designed for local
 - OpenAI-compatible Chat Completions and practical Responses API support.
 - Persistent `stream-json` runtime by default, plus `print` fallback mode.
 - SSE streaming and keepalives for long-running Claude Code turns.
+- Intentional-wait handling for Claude Code `ScheduleWakeup` / background-task parks, with chat-completions and Responses streaming parity.
 - Usage/cache metadata and estimated cost annotations.
 - Caller-dispatched OpenAI tool call bridge.
 - Optional direct MCP injection for advanced local setups.
@@ -103,7 +104,9 @@ Two Claude subprocess strategies are available:
 - `stream-json` — default. Uses Claude Code's stream-json transport, init pool, and session pool for better latency and prompt-cache reuse.
 - `print` — incident-response fallback. Spawns a fresh `claude --print` subprocess per request. Slower, but simpler and isolated.
 
-See [Configuration](docs/configuration.md#runtime) for details.
+In `stream-json`, Claude Code may intentionally park a turn with `ScheduleWakeup`, `Monitor`, or `TaskOutput` while background work finishes. The proxy treats the strict interim text `Sleeping the loop. Will resume when ...` as an intentional wait, keeps the worker busy/out of the pool, keeps the SSE stream alive, and finalizes only on a later real result/error or the absolute cap. `/v1/chat/completions` emits progress as chat delta chunks; `/v1/responses` emits proxy progress as `response.in_progress` lifecycle events so `response.output_text.delta` still matches the final `response.output_text.done` text.
+
+See [Configuration](docs/configuration.md#runtime) and [Scheduled wakeup / background-task waits](docs/configuration.md#scheduled-wakeup--background-task-waits) for details.
 
 ## Sticky sessions
 
@@ -132,7 +135,7 @@ For OpenClaw, use the local `claude-proxy-sticky` provider plugin plus the OpenA
 
 The safer default is caller-dispatched tools: the caller owns tool execution, approval, audit, and allowlists. The proxy can return OpenAI-style `tool_calls` so the caller can execute tools and send back tool results.
 
-Optional MCP injection (`CLAUDE_PROXY_TOOLS_TRANSLATION=1`) registers selected MCP servers directly with the inner Claude CLI. This is useful for local automation but changes the security boundary: the inner Claude CLI executes those MCP tools directly, outside the caller's dispatcher. See [OpenClaw tool modes](docs/openclaw-integration.md#tool-modes) before enabling it.
+Optional MCP injection (`CLAUDE_PROXY_TOOLS_TRANSLATION=1`) registers selected MCP servers directly with the inner Claude CLI. This is useful for local automation but changes the security boundary: the inner Claude CLI executes those MCP tools directly, outside the caller's dispatcher. By default, native MCP tools that overlap caller-dispatched OpenClaw tools are disallowed so OpenClaw remains authoritative; trusted local overlaps can be explicitly allowed with `CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS`, for example `openbrain-local,serena`. See [OpenClaw tool modes](docs/openclaw-integration.md#tool-modes) before enabling it.
 
 ## Security notes
 
