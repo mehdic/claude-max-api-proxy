@@ -36,6 +36,8 @@ Only use `CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=true` on a trusted local machine w
 | `CLAUDE_PROXY_ALLOW_RUNTIME_OVERRIDE` | unset | Set `1` to allow per-request `X-Claude-Proxy-Runtime: print` or `stream-json`. Off by default. |
 | `CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE` | unset | Set `1` to retry once with `print` when a recognized stream-layer failure happens before response bytes are committed. |
 | `CLAUDE_PROXY_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS` | unset | Set `1` to request Claude CLI dynamic-system-prompt exclusion when the installed CLI supports the flag. |
+| `CLAUDE_PROXY_LIVENESS_PROGRESS` | unset | Set `1` to emit opt-in synthetic progress chunks during long quiet stream-json turns. Disabled by default; useful for hosts whose upstream client has a provider-event idle timeout. |
+| `CLAUDE_PROXY_INTERIM_NARRATION_PROGRESS` | unset | Set `1` to emit Claude Code interim narration as synthetic progress chunks instead of final-answer text. Disabled by default; intended for clients that strip/handle proxy progress chunks. |
 | `CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | unset | Set `true` to pass Claude CLI's permission-skipping flag. Useful for trusted headless services; risky on untrusted hosts. |
 
 ### Choosing a runtime

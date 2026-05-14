@@ -4,11 +4,11 @@
  * Watches raw stream-json events from a Claude subprocess and derives
  * truthful progress descriptions for meaningful runtime phases:
  *
- *   - tool_use start  → "[Thinking: using Read…]" (real tool name from the event)
- *   - long tool wait   → "[Tinkering: waiting for Read, 12s…]" (only after silence threshold)
- *   - Agent tool       → "[Checking: using Sir Greps-a-Lot Subagent — inspect auth flow…]"
+ *   - tool_use start  → "Bubbling...\n📖 Read" (real tool name from the event)
+ *   - long tool wait   → "Bubbling...\n🛠️ Exec: npm test (in /repo) · 12s"
+ *   - Agent tool       → "Bubbling...\n🧑🔧 Sub-agent: Sir Greps-a-Lot Subagent — inspect auth flow…"
  *                        (deterministic funny name + extracted activity)
- *   - thinking         → "[Reviewing: thinking…]" (inferred: no tool/text activity
+ *   - thinking         → "Bubbling...\n🫧 Working: thinking…" (inferred: no tool/text activity
  *                        for ≥8s — conservative, fires once per silent period)
  *   - n8n progress     → delegated to the existing n8n progress module
  *
@@ -41,16 +41,87 @@ export const STATUS_PREFIXES: readonly string[] = [
   "Testing",
 ] as const;
 
-function statusPrefix(): string {
-  return STATUS_PREFIXES[Math.floor(Math.random() * STATUS_PREFIXES.length)];
+const PROGRESS_HEADER = "Bubbling...";
+
+function openClawToolKey(rawToolName: string | null): string {
+  if (!rawToolName) return "working";
+  const normalized = normalizeToolName(rawToolName);
+  const lower = normalized.toLowerCase();
+  if (lower === "bash" || lower === "shell" || lower === "exec") return "exec";
+  if (lower === "read") return "read";
+  if (lower === "write") return "write";
+  if (lower === "edit" || lower === "multiedit") return "edit";
+  if (lower === "websearch") return "web_search";
+  if (lower === "webfetch") return "web_fetch";
+  if (lower === "agent" || lower === "task") return "sessions_spawn";
+  return normalized;
 }
 
-function renderProgress(body: string): string {
-  return `[${statusPrefix()}: ${body}]`;
+function toolIcon(rawToolName: string | null): string {
+  const key = openClawToolKey(rawToolName).toLowerCase();
+  if (key === "working") return "🫧";
+  if (key === "exec") return "🛠️";
+  if (key === "process") return "🧰";
+  if (key === "read") return "📖";
+  if (key === "write") return "✍️";
+  if (key === "edit") return "📝";
+  if (key === "browser") return "🌐";
+  if (key === "sessions_spawn") return "🧑‍🔧";
+  if (key === "memory_search") return "🧠";
+  if (key === "memory_get") return "📓";
+  if (key === "web_search") return "🔎";
+  if (key === "web_fetch") return "📄";
+  if (key.includes("openbrain") || key.includes("serena")) return "🧩";
+  return "🧩";
+}
+
+function titleCaseToken(token: string): string {
+  if (!token) return token;
+  return token[0].toUpperCase() + token.slice(1);
+}
+
+function titleCaseToolAction(value: string): string {
+  return value
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map(titleCaseToken)
+    .join(" ");
+}
+
+function titleCaseNamespace(value: string): string {
+  const normalized = value.toLowerCase().replace(/_/g, "-");
+  if (normalized === "openbrain-local") return "Openbrain-local";
+  return value
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map(titleCaseToken)
+    .join(" ");
+}
+
+function displayToolTitle(rawToolName: string | null): string {
+  if (!rawToolName) return "Working";
+  const key = openClawToolKey(rawToolName);
+  const mapped = displayName(key);
+  if (mapped !== key) return mapped;
+  const raw = key;
+  const withoutMcpPrefix = raw.startsWith("mcp__") ? raw.slice("mcp__".length) : raw;
+  const namespaceMatch = withoutMcpPrefix.match(/^([^_]+(?:-[^_]+)?)__(.+)$/);
+  if (namespaceMatch?.[1] && namespaceMatch[2]) {
+    const namespace = titleCaseNamespace(namespaceMatch[1]);
+    const action = titleCaseToolAction(namespaceMatch[2]);
+    return `${namespace} ${action}`.trim();
+  }
+  const withoutNamespace = raw.includes("__") ? raw.split("__").pop()! : raw;
+  return titleCaseToolAction(withoutNamespace) || raw;
+}
+
+function renderProgress(rawToolName: string | null, body: string, options: { includeHeader?: boolean } = {}): string {
+  const title = displayToolTitle(rawToolName);
+  const line = body ? `${toolIcon(rawToolName)} ${title}: ${body}` : `${toolIcon(rawToolName)} ${title}`;
+  return options.includeHeader === false ? line : `${PROGRESS_HEADER}\n${line}`;
 }
 
 /**
- * Whimsical subagent names for Agent tool calls. The list is intentionally
  * small so names feel familiar/recurring rather than random noise.
  */
 const AGENT_NAMES: readonly string[] = [
@@ -80,13 +151,11 @@ export function agentNameFor(id: string): string {
 const ACTIVITY_MAX_LEN = 60;
 
 /**
- * Fields we look for (in priority order) inside the Agent tool's JSON input
  * to derive a short activity description.
  */
 const ACTIVITY_FIELDS = ["description", "subagent_type", "prompt", "task", "instructions"] as const;
 
 /**
- * Try to extract a useful short activity from accumulated Agent tool JSON input.
  * Returns null if nothing usable is found.
  */
 export function extractActivity(partialJson: string): string | null {
@@ -139,8 +208,113 @@ export function sanitizeActivity(raw: string): string | null {
   return clean || null;
 }
 
+interface ToolInputSummary {
+  command?: string;
+  cwd?: string;
+  query?: string;
+  args?: Record<string, unknown>;
+}
+
+function safeJsonValue(partialJson: string, field: string): string | undefined {
+  try {
+    const obj = JSON.parse(partialJson) as Record<string, unknown>;
+    const val = obj[field];
+    return typeof val === "string" && val.trim() ? val.trim() : undefined;
+  } catch {
+    const re = new RegExp(`"${field}"\\s*:\\s*"([^"]{1,240})"`);
+    const match = partialJson.match(re);
+    return match?.[1]?.trim() || undefined;
+  }
+}
+
+function parseToolArgs(partialJson: string): Record<string, unknown> | undefined {
+  try {
+    const obj = JSON.parse(partialJson) as Record<string, unknown>;
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function summarizeToolInput(rawToolName: string | null, partialJson: string): ToolInputSummary | null {
+  if (!rawToolName || !partialJson) return null;
+  const args = parseToolArgs(partialJson);
+  const command = safeJsonValue(partialJson, "command");
+  const cwd = safeJsonValue(partialJson, "cwd") || safeJsonValue(partialJson, "workdir");
+  const query = safeJsonValue(partialJson, "query")
+    || safeJsonValue(partialJson, "text")
+    || safeJsonValue(partialJson, "path")
+    || safeJsonValue(partialJson, "file_path")
+    || safeJsonValue(partialJson, "relative_path")
+    || safeJsonValue(partialJson, "substring_pattern")
+    || safeJsonValue(partialJson, "pattern")
+    || safeJsonValue(partialJson, "project")
+    || safeJsonValue(partialJson, "url");
+  const summary: ToolInputSummary = {};
+  if (command) summary.command = sanitizeActivity(command) || undefined;
+  if (cwd) summary.cwd = cwd;
+  if (query) summary.query = sanitizeActivity(query) || undefined;
+  if (args) summary.args = args;
+  return Object.keys(summary).length > 0 ? summary : null;
+}
+
+function summaryKey(summary: ToolInputSummary | null): string {
+  if (!summary) return "";
+  return [summary.command, summary.cwd, summary.query, summary.args ? JSON.stringify(summary.args) : ""].filter(Boolean).join("|");
+}
+
+function compactOneLine(raw: string, maxLength = 120): string {
+  const oneLine = raw.replace(/\s*\n\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+  return oneLine.length <= maxLength ? oneLine : `${oneLine.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function openClawDetailFromSummary(rawToolName: string, summary: ToolInputSummary | null): string {
+  const key = openClawToolKey(rawToolName).toLowerCase();
+  const args = summary?.args ?? {};
+  if (key === "exec") {
+    const cwd = summary?.cwd ? ` (in ${summary.cwd})` : "";
+    return summary?.command ? `${compactOneLine(summary.command)}${cwd}` : "";
+  }
+  if (key === "read") {
+    const path = summary?.query;
+    const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.max(1, Math.floor(args.offset)) : undefined;
+    const limit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.max(1, Math.floor(args.limit)) : undefined;
+    if (!path) return "";
+    if (offset !== undefined && limit !== undefined) return `${limit === 1 ? "line" : "lines"} ${offset}-${offset + limit - 1} from ${path}`;
+    if (offset !== undefined) return `from line ${offset} in ${path}`;
+    if (limit !== undefined) return `first ${limit} ${limit === 1 ? "line" : "lines"} of ${path}`;
+    return `from ${path}`;
+  }
+  if (key === "write" || key === "edit") {
+    const path = summary?.query;
+    const content = typeof args.content === "string" ? args.content : typeof args.newText === "string" ? args.newText : typeof args.new_string === "string" ? args.new_string : undefined;
+    if (!path) return "";
+    const destinationPrefix = key === "edit" ? "in" : "to";
+    return content && content.length > 0 ? `${destinationPrefix} ${path} (${content.length} chars)` : `${destinationPrefix} ${path}`;
+  }
+  if (key === "web_search") {
+    const query = summary?.query;
+    const count = typeof args.count === "number" && Number.isFinite(args.count) && args.count > 0 ? Math.floor(args.count) : undefined;
+    if (!query) return "";
+    return count !== undefined ? `for "${query}" (top ${count})` : `for "${query}"`;
+  }
+  if (key === "web_fetch") {
+    return summary?.query ? `from ${summary.query}` : "";
+  }
+  return summary?.query ? compactOneLine(summary.query) : "";
+}
+
+function renderToolAction(rawToolName: string, label: string, summary: ToolInputSummary | null, phase: "start" | "wait", secs?: number): string {
+  if (rawToolName === "Agent") {
+    if (phase === "wait") return `waiting for ${label}${secs ? `, ${secs}s` : ""}…`;
+    return label;
+  }
+  const detail = openClawDetailFromSummary(rawToolName, summary);
+  if (detail) return phase === "wait" && secs ? `${detail} · ${secs}s` : detail;
+  return phase === "wait" && secs ? `${secs}s` : "";
+}
+
 /**
- * Build the display label for an Agent tool call.
  */
 function agentDisplayLabel(toolCallId: string, activity: string | null): string {
   const name = `${agentNameFor(toolCallId)} Subagent`;
@@ -155,10 +329,29 @@ function agentDisplayLabel(toolCallId: string, activity: string | null): string 
  * Agent is handled specially via agentDisplayLabel(); this map is for
  * simple static renames only.
  */
-const TOOL_DISPLAY_NAMES: Record<string, string> = {};
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  Bash: "Exec",
+  bash: "Exec",
+  shell: "Exec",
+  exec: "Exec",
+  read: "Read",
+  write: "Write",
+  edit: "Edit",
+  sessions_spawn: "Sub-agent",
+  memory_search: "Memory Search",
+  openbrain_local__search_thoughts: "Openbrain-local Search Thoughts",
+  "openbrain-local__search_thoughts": "Openbrain-local Search Thoughts",
+  openbrain_local__capture_thought: "Openbrain-local Capture Thought",
+  "openbrain-local__capture_thought": "Openbrain-local Capture Thought",
+};
+
+function normalizeToolName(rawToolName: string): string {
+  return rawToolName.startsWith("mcp__") ? rawToolName.slice("mcp__".length) : rawToolName;
+}
 
 function displayName(rawToolName: string): string {
-  return TOOL_DISPLAY_NAMES[rawToolName] ?? rawToolName;
+  const normalized = normalizeToolName(rawToolName);
+  return TOOL_DISPLAY_NAMES[rawToolName] ?? TOOL_DISPLAY_NAMES[normalized] ?? rawToolName;
 }
 
 export interface PhaseSnapshot {
@@ -184,16 +377,19 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
   let toolStartedAt: number = 0;
   let toolWaitReported: boolean = false;
   let lastContentDeltaAt: number = 0;
+  let progressGroupOpen: boolean = false;
 
   // Thinking phase: inferred silence while the main agent has no tool/text
   // activity. Fires once per silent period after the silence threshold.
   let lastActivityAt: number = Date.now();
   let thinkingReported: boolean = false;
 
-  // Accumulate JSON input for Agent tool calls to extract activity.
   let agentInputBuffer: string = "";
   let agentActivity: string | null = null;
   let agentActivityExtracted: boolean = false;
+
+  let toolInputBuffer: string = "";
+  let toolInputSummary: ToolInputSummary | null = null;
 
   const onMessage = (msg: unknown) => {
     if (!msg || typeof msg !== "object") return;
@@ -216,6 +412,8 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
       toolWaitReported = false;
       lastActivityAt = Date.now();
       thinkingReported = true; // tool is now active — suppress thinking
+      toolInputBuffer = "";
+      toolInputSummary = null;
       // Reset Agent input accumulator.
       if (activeToolName === "Agent") {
         agentInputBuffer = "";
@@ -227,9 +425,12 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
         agentActivityExtracted = true; // no extraction needed for non-Agent
       }
     } else if (ev.type === "content_block_delta" && ev.delta?.type === "input_json_delta") {
-      // Accumulate Agent tool input to extract activity.
+      const partial = ev.delta.partial_json || "";
+      if (partial && activeToolName) {
+        toolInputBuffer += partial;
+        toolInputSummary = summarizeToolInput(activeToolName, toolInputBuffer) || toolInputSummary;
+      }
       if (activeToolName === "Agent" && !agentActivityExtracted) {
-        const partial = ev.delta.partial_json || "";
         if (partial) {
           agentInputBuffer += partial;
           // Try to extract activity after we have some data (don't try on every tiny chunk).
@@ -255,17 +456,24 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
         agentActivityExtracted = true;
         agentInputBuffer = "";
       }
+      toolInputSummary = summarizeToolInput(activeToolName, toolInputBuffer) || toolInputSummary;
       // Keep activeToolName set so the wait phase can fire.
     } else if (ev.type === "content_block_start" && ev.content_block?.type === "text") {
       // Claude started a new text block — tool execution is over.
+      progressGroupOpen = false;
       activeToolName = null;
+      toolInputBuffer = "";
+      toolInputSummary = null;
       toolWaitReported = false;
       lastActivityAt = Date.now();
       thinkingReported = true; // text is flowing — suppress thinking
     } else if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
       lastContentDeltaAt = Date.now();
+      progressGroupOpen = false;
       // Text flowing means no tool wait.
       activeToolName = null;
+      toolInputBuffer = "";
+      toolInputSummary = null;
       toolWaitReported = false;
       lastActivityAt = Date.now();
       thinkingReported = true; // text is flowing — suppress thinking
@@ -275,21 +483,27 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
   subprocess.on("message", onMessage);
 
   /**
-   * Build the display label for the active tool. Agent tools get a funny name
    * plus optional activity; other tools use the static display name.
    */
   const getToolLabel = (): string => {
     if (activeToolName === "Agent") {
       return agentDisplayLabel(activeToolCallId, agentActivity);
     }
-    return displayName(activeToolName!);
+    return displayToolTitle(activeToolName!);
   };
 
   const getToolPhaseKey = (): string => {
+    const inputKey = summaryKey(toolInputSummary);
     if (activeToolName === "Agent") {
-      return agentActivity || "";
+      return [agentActivity || "", inputKey].filter(Boolean).join(":");
     }
-    return "";
+    return inputKey;
+  };
+
+  const renderGroupedProgress = (rawToolName: string | null, body: string): string => {
+    const text = renderProgress(rawToolName, body, { includeHeader: !progressGroupOpen });
+    progressGroupOpen = true;
+    return text;
   };
 
   return {
@@ -304,7 +518,7 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
         const key = `tool_use:${activeToolName}:${toolStartedAt}:${getToolPhaseKey()}`;
         if (key !== currentPhase) {
           currentPhase = key;
-          return { text: renderProgress(`using ${label}\u2026`), key };
+          return { text: renderGroupedProgress(activeToolName, renderToolAction(activeToolName, label, toolInputSummary, "start")), key };
         }
       }
 
@@ -317,7 +531,7 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
           if (key !== currentPhase) {
             currentPhase = key;
             const secs = Math.round(elapsed / 1000);
-            return { text: renderProgress(`waiting for ${label}, ${secs}s\u2026`), key };
+            return { text: renderGroupedProgress(activeToolName, renderToolAction(activeToolName, label, toolInputSummary, "wait", secs)), key };
           }
         }
       }
@@ -332,7 +546,7 @@ export function attachPhaseTracker(subprocess: EventEmitter): PhaseTracker {
           const key = `thinking:${lastActivityAt}`;
           if (key !== currentPhase) {
             currentPhase = key;
-            return { text: renderProgress("thinking\u2026"), key };
+            return { text: renderGroupedProgress(null, "thinking\u2026"), key };
           }
         }
       }

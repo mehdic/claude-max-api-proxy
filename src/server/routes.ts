@@ -105,6 +105,25 @@ export function createSseKeepaliveComment(requestId: string, count: number): str
   return `:keepalive req_id=${requestId} count=${count}\n\n`;
 }
 
+export function createLivenessProgressText(): string {
+  return "\nBubbling...\n🫧 Working maybe: thinking…\n";
+}
+
+export function livenessProgressEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CLAUDE_PROXY_LIVENESS_PROGRESS === "1";
+}
+
+export function interimNarrationProgressEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CLAUDE_PROXY_INTERIM_NARRATION_PROGRESS === "1";
+}
+
+export function createInterimNarrationProgressText(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  const shortened = compact.length > 240 ? `${compact.slice(0, 237)}…` : compact;
+  return `\nBubbling...\n🧠 Thinking: ${shortened}\n`;
+}
+
 export function hasRenderableAssistantContent(text: string): boolean {
   return text.replace(/[\u200B\u200C\u200D\uFEFF]/g, "").trim().length > 0;
 }
@@ -706,6 +725,11 @@ async function handleStreamJsonRequest(
   let assistantText = "";
   let bridgeTextBuffer = "";
   let bridgeTextStreaming = false;
+  let streamedAssistantText = false;
+  const streamAssistantTextDeltas = process.env.CLAUDE_PROXY_STREAM_ASSISTANT_DELTAS === "1";
+  const emitLivenessProgress = livenessProgressEnabled();
+  const emitInterimNarrationProgress = interimNarrationProgressEnabled();
+  let interimNarrationBuffer = "";
   let done = false;
   let keepaliveCount = 0;
   const requestStartAt = Date.now();
@@ -748,6 +772,15 @@ async function handleStreamJsonRequest(
         content = "\n" + phase.text + "\n";
         mode = "phase";
       }
+    }
+
+    // Priority 3: when final-only assistant text streaming is active, keep
+    // OpenClaw's provider-event idle watchdog alive with a progress data chunk.
+    // SSE comments keep the HTTP socket warm but OpenClaw strips comment-only
+    // frames before provider parsing, so comments alone do not reset model idle.
+    if (!hasRenderableAssistantContent(content) && emitLivenessProgress && !streamAssistantTextDeltas && keepaliveCount > 1) {
+      content = createLivenessProgressText();
+      mode = "progress";
     }
 
     if (hasRenderableAssistantContent(content)) {
@@ -859,6 +892,7 @@ async function handleStreamJsonRequest(
     };
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     isFirst = false;
+    streamedAssistantText = true;
     lastClientActivityAt = Date.now();
   };
 
@@ -867,6 +901,26 @@ async function handleStreamJsonRequest(
     if (!text) return;
     assistantText += text;
     lastClaudeActivityAt = Date.now();
+
+    // Claude Code stream-json emits intermediate assistant narration while tools are
+    // running ("Now applying...", "Found root cause...", etc.). OpenAI chat
+    // deltas have no phase metadata, so forwarding them live makes OpenClaw/Telegram
+    // mix scratchpad/tool narration into the user-visible final answer. By default
+    // keep final-only text. Operators with an OpenClaw progress bridge can opt in
+    // to showing this narration as provider progress instead.
+    if (!streamAssistantTextDeltas) {
+      if (emitInterimNarrationProgress && stream && !res.writableEnded) {
+        interimNarrationBuffer += text;
+        const shouldFlush = /[.!?]\s$|\n$/.test(interimNarrationBuffer) || interimNarrationBuffer.length >= 180;
+        if (shouldFlush) {
+          const progress = createInterimNarrationProgressText(interimNarrationBuffer);
+          interimNarrationBuffer = "";
+          if (progress) writeContentChunk(progress);
+        }
+      }
+      return;
+    }
+
     if (bridgeTools) {
       if (!stream || res.writableEnded) return;
       if (bridgeTextStreaming) {
@@ -918,6 +972,11 @@ async function handleStreamJsonRequest(
     tb.commit();
 
     if (stream && !res.writableEnded) {
+      if (!streamAssistantTextDeltas && emitInterimNarrationProgress && interimNarrationBuffer) {
+        const progress = createInterimNarrationProgressText(interimNarrationBuffer);
+        interimNarrationBuffer = "";
+        if (progress) writeContentChunk(progress);
+      }
       const usage = body.stream_options?.include_usage === true ? resultUsageToOpenAI(result) : undefined;
       if (parsed.toolCalls.length > 0) {
         for (const chunk of createToolCallChunks(requestId, lastModel, parsed.toolCalls)) {
@@ -925,16 +984,8 @@ async function handleStreamJsonRequest(
         }
         res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage, "tool_calls"))}\n\n`);
       } else {
-        if (bridgeTools && !bridgeTextStreaming && parsed.textContent) {
-          const contentChunk = {
-            id: `chatcmpl-${requestId}`,
-            object: "chat.completion.chunk" as const,
-            created: Math.floor(Date.now() / 1000),
-            model: lastModel,
-            choices: [{ index: 0, delta: { role: isFirst ? "assistant" as const : undefined, content: parsed.textContent }, finish_reason: null }],
-          };
-          res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
-          isFirst = false;
+        if (!streamedAssistantText && parsed.textContent) {
+          writeContentChunk(parsed.textContent);
         }
         res.write(`data: ${JSON.stringify(createDoneChunk(requestId, lastModel, usage))}\n\n`);
       }

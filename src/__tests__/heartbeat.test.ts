@@ -9,17 +9,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "events";
 import {
+  createInterimNarrationProgressText,
+  createLivenessProgressText,
   createProgressChunk,
   createSseKeepaliveComment,
   hasRenderableAssistantContent,
+  interimNarrationProgressEnabled,
+  livenessProgressEnabled,
 } from "../server/routes.js";
-import { attachPhaseTracker, STATUS_PREFIXES } from "../server/phase-tracker.js";
+import { attachPhaseTracker } from "../server/phase-tracker.js";
 
 function assertProgressBody(text: string, expectedBody: string): void {
-  const match = text.match(/^\[([^:]+): (.*)\]$/);
-  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
-  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
-  assert.strictEqual(match[2], expectedBody);
+  assert.strictEqual(text, `Bubbling...\n${expectedBody}`);
 }
 
 test("generic keepalive is an SSE comment, not a data chunk", () => {
@@ -27,6 +28,33 @@ test("generic keepalive is an SSE comment, not a data chunk", () => {
   assert.strictEqual(frame, ":keepalive req_id=req123 count=7\n\n");
   assert.ok(!frame.startsWith("data:"), "generic keepalive must not be parsed as OpenAI content");
   assert.ok(!frame.includes("delta"), "generic keepalive must not include assistant delta content");
+});
+
+test("liveness progress is disabled by default and opt-in by env", () => {
+  assert.equal(livenessProgressEnabled({}), false);
+  assert.equal(livenessProgressEnabled({ CLAUDE_PROXY_LIVENESS_PROGRESS: "0" }), false);
+  assert.equal(livenessProgressEnabled({ CLAUDE_PROXY_LIVENESS_PROGRESS: "1" }), true);
+});
+
+test("interim narration progress is disabled by default and opt-in by env", () => {
+  assert.equal(interimNarrationProgressEnabled({}), false);
+  assert.equal(interimNarrationProgressEnabled({ CLAUDE_PROXY_INTERIM_NARRATION_PROGRESS: "0" }), false);
+  assert.equal(interimNarrationProgressEnabled({ CLAUDE_PROXY_INTERIM_NARRATION_PROGRESS: "1" }), true);
+});
+
+test("interim narration progress wraps text as progress, not plain assistant text", () => {
+  const text = createInterimNarrationProgressText("Found the root cause. Now applying the fix.");
+  assertProgressBody(text.trim(), "🧠 Thinking: Found the root cause. Now applying the fix.");
+  const chunk = createProgressChunk("req_narration", "claude-sonnet-4", false, text);
+  assert.strictEqual(chunk.choices[0].delta.content, text);
+});
+
+test("liveness progress is a recognizable hidden provider progress sentinel", () => {
+  const text = createLivenessProgressText();
+  assertProgressBody(text.trim(), "🫧 Working maybe: thinking…");
+  assert.ok(hasRenderableAssistantContent(text), "liveness progress must be renderable");
+  const chunk = createProgressChunk("req_live", "claude-sonnet-4", false, text);
+  assert.strictEqual(chunk.choices[0].delta.content, text);
 });
 
 test("renderable-content helper rejects empty, whitespace, and ZWSP-only text", () => {
@@ -87,7 +115,7 @@ test("phase tracker progress produces valid progress chunks", () => {
   // Verify it can produce a valid progress chunk (no throw).
   const chunk = createProgressChunk("req_test", "claude-sonnet-4", true, "\n" + phase.text + "\n");
   assert.strictEqual(chunk.choices[0].delta.role, "assistant");
-  assert.ok(chunk.choices[0].delta.content?.includes("Bash"));
+  assert.ok(chunk.choices[0].delta.content?.includes("Exec"));
 
   tracker.detach();
 });
@@ -105,7 +133,7 @@ test("thinking phase produces valid progress chunks", () => {
     const phase = tracker.poll();
     assert.ok(phase, "phase tracker should report thinking after silence");
     assert.ok(hasRenderableAssistantContent(phase.text), "thinking text must be renderable");
-    assertProgressBody(phase.text, "thinking\u2026");
+    assertProgressBody(phase.text, "🫧 Working: thinking\u2026");
     // Verify it can produce a valid progress chunk (no throw).
     const chunk = createProgressChunk("req_think", "claude-sonnet-4", true, "\n" + phase.text + "\n");
     assert.strictEqual(chunk.choices[0].delta.role, "assistant");

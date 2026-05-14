@@ -10,7 +10,6 @@ import {
   agentNameFor,
   extractActivity,
   sanitizeActivity,
-  STATUS_PREFIXES,
 } from "../server/phase-tracker.js";
 
 function makeStreamEvent(eventType: string, extra: Record<string, unknown> = {}) {
@@ -23,19 +22,20 @@ function makeStreamEvent(eventType: string, extra: Record<string, unknown> = {})
 }
 
 function assertProgressBody(text: string, expectedBody: string): string {
-  const match = text.match(/^\[([^:]+): (.*)\]$/);
-  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
-  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
-  assert.strictEqual(match[2], expectedBody);
-  return match[1];
+  assert.strictEqual(text, `Bubbling...\n${expectedBody}`);
+  return "Bubbling";
 }
 
 function assertProgressBodyMatches(text: string, bodyPattern: RegExp): string {
-  const match = text.match(/^\[([^:]+): (.*)\]$/);
-  assert.ok(match, `progress text should be bracketed with a prefix: ${text}`);
-  assert.ok(STATUS_PREFIXES.includes(match[1]), `prefix should be in allowed list: ${match[1]}`);
-  assert.match(match[2], bodyPattern);
-  return match[1];
+  assert.ok(text.startsWith("Bubbling...\n"), `progress text should start with Bubbling: ${text}`);
+  const body = text.slice("Bubbling...\n".length);
+  assert.match(body, bodyPattern);
+  return "Bubbling";
+}
+
+function assertProgressLine(text: string, expectedLine: string): void {
+  assert.strictEqual(text, expectedLine);
+  assert.ok(!text.startsWith("Bubbling...\n"), "same progress group should not repeat Bubbling header");
 }
 
 // ── agentNameFor ────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ test("reports tool_use start with tool name", () => {
   const snap = tracker.poll();
   assert.ok(snap, "should return a phase snapshot");
   assert.match(snap.text, /Read/);
-  assertProgressBody(snap.text, "using Read…");
+  assertProgressBody(snap.text, "📖 Read");
 
   tracker.detach();
 });
@@ -158,6 +158,43 @@ test("deduplicates consecutive same-phase polls", () => {
   assert.strictEqual(second, null, "same phase should not be re-reported");
 
   tracker.detach();
+});
+
+test("Bash progress includes command and cwd when streamed in tool input", () => {
+  const ee = new EventEmitter();
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  const tracker = attachPhaseTracker(ee);
+
+  try {
+    ee.emit("message", makeStreamEvent("content_block_start", {
+      content_block: { type: "tool_use", name: "Bash", id: "tu_bash_progress" },
+    }));
+
+    const first = tracker.poll();
+    assert.ok(first);
+    assertProgressBody(first.text, "🛠️ Exec");
+
+    ee.emit("message", makeStreamEvent("content_block_delta", {
+      delta: {
+        type: "input_json_delta",
+        partial_json: JSON.stringify({ command: "npm test", cwd: "/tmp/claude-proxy" }),
+      },
+    }));
+
+    const withCommand = tracker.poll();
+    assert.ok(withCommand, "should re-emit when Bash command details arrive");
+    assertProgressLine(withCommand.text, "🛠️ Exec: npm test (in /tmp/claude-proxy)");
+
+    now += 12_000;
+    const completed = tracker.poll();
+    assert.ok(completed, "should report long command wait in OpenClaw exec style");
+    assertProgressLine(completed.text, "🛠️ Exec: npm test (in /tmp/claude-proxy) · 12s");
+  } finally {
+    tracker.detach();
+    Date.now = originalNow;
+  }
 });
 
 test("new tool_use produces a new phase", () => {
@@ -239,7 +276,7 @@ test("Agent tool displays with a funny subagent name", () => {
   assert.ok(snap, "should return a phase snapshot");
   const expectedName = agentNameFor("tu_agent_1");
   assert.ok(snap.text.includes(expectedName), `should contain funny name "${expectedName}" but got "${snap.text}"`);
-  assertProgressBody(snap.text, `using ${expectedName} Subagent…`);
+  assertProgressBody(snap.text, `🧑‍🔧 Sub-agent: ${expectedName} Subagent`);
   assert.ok(snap.text.includes("Subagent"), "should identify the Agent tool display as a subagent");
   assert.ok(!snap.text.includes("using Agent…"), "should not show raw 'Agent'");
   // Dedup key must still use the raw tool name so tracking semantics are preserved.
@@ -308,7 +345,7 @@ test("Agent tool wait displays funny name and activity", () => {
     const expectedName = agentNameFor("tu_agent_wait");
     assert.ok(waitSnap.text.includes(expectedName));
     assert.ok(waitSnap.text.includes("12s"), "should include elapsed seconds");
-    assertProgressBodyMatches(waitSnap.text, /^waiting for .+ Subagent .+, 12s…$/);
+    assert.match(waitSnap.text, /^🧑‍🔧 Sub-agent: waiting for .+ Subagent .+, 12s…$/);
     assert.match(waitSnap.key, /Agent/, "dedup key should still use raw tool name");
   } finally {
     tracker.detach();
@@ -336,8 +373,8 @@ test("Agent tool deterministic name: same id always gets same name", () => {
 
   assert.ok(snap1 && snap2);
   const expectedName = agentNameFor("stable_id_123");
-  assertProgressBody(snap1.text, `using ${expectedName} Subagent…`);
-  assertProgressBody(snap2.text, `using ${expectedName} Subagent…`);
+  assertProgressBody(snap1.text, `🧑‍🔧 Sub-agent: ${expectedName} Subagent`);
+  assertProgressBody(snap2.text, `🧑‍🔧 Sub-agent: ${expectedName} Subagent`);
 });
 
 test("Agent tool without activity shows just the funny name", () => {
@@ -351,7 +388,7 @@ test("Agent tool without activity shows just the funny name", () => {
   const snap = tracker.poll();
   assert.ok(snap);
   const expectedName = agentNameFor("tu_no_activity");
-  assertProgressBody(snap.text, `using ${expectedName} Subagent…`);
+  assertProgressBody(snap.text, `🧑‍🔧 Sub-agent: ${expectedName} Subagent`);
   // No em-dash separator when there's no activity.
   assert.ok(!snap.text.includes("\u2014"));
 
@@ -370,8 +407,95 @@ test("non-Agent tool names are not renamed", () => {
     }));
     const snap = tracker.poll();
     assert.ok(snap);
-    assertProgressBody(snap.text, `using ${name}…`);
+    const expected: Record<string, string> = {
+      Read: "📖 Read",
+      Write: "✍️ Write",
+      Bash: "🛠️ Exec",
+      Task: "🧑‍🔧 Sub-agent",
+      Grep: "🧩 Grep",
+    };
+    assertProgressBody(snap.text, expected[name]);
     // Reset state by emitting a text block.
+    ee.emit("message", makeStreamEvent("content_block_start", {
+      content_block: { type: "text", text: "" },
+    }));
+  }
+
+  tracker.detach();
+});
+
+test("tool input details are shown after the tool title", () => {
+  const ee = new EventEmitter();
+  const tracker = attachPhaseTracker(ee);
+
+  ee.emit("message", makeStreamEvent("content_block_start", {
+    content_block: { type: "tool_use", name: "Read", id: "tu_read_detail" },
+  }));
+  const first = tracker.poll();
+  assert.ok(first);
+  assertProgressBody(first.text, "📖 Read");
+
+  ee.emit("message", makeStreamEvent("content_block_delta", {
+    delta: {
+      type: "input_json_delta",
+      partial_json: JSON.stringify({ file_path: "src/server/phase-tracker.ts" }),
+    },
+  }));
+  const detailed = tracker.poll();
+  assert.ok(detailed);
+  assertProgressLine(detailed.text, "📖 Read: from src/server/phase-tracker.ts");
+
+  tracker.detach();
+});
+
+test("Bubbling header groups consecutive tool progress until normal text", () => {
+  const ee = new EventEmitter();
+  const tracker = attachPhaseTracker(ee);
+
+  ee.emit("message", makeStreamEvent("content_block_start", {
+    content_block: { type: "tool_use", name: "Read", id: "tu_group_read" },
+  }));
+  const first = tracker.poll();
+  assert.ok(first);
+  assertProgressBody(first.text, "📖 Read");
+
+  ee.emit("message", makeStreamEvent("content_block_start", {
+    content_block: { type: "tool_use", name: "Write", id: "tu_group_write" },
+  }));
+  const second = tracker.poll();
+  assert.ok(second);
+  assertProgressLine(second.text, "✍️ Write");
+
+  ee.emit("message", makeStreamEvent("content_block_delta", {
+    delta: { type: "text_delta", text: "normal answer text" },
+  }));
+  ee.emit("message", makeStreamEvent("content_block_start", {
+    content_block: { type: "tool_use", name: "Grep", id: "tu_group_grep" },
+  }));
+  const afterText = tracker.poll();
+  assert.ok(afterText);
+  assertProgressBody(afterText.text, "🧩 Grep");
+
+  tracker.detach();
+});
+
+test("MCP names keep their namespace in progress display", () => {
+  const ee = new EventEmitter();
+  const tracker = attachPhaseTracker(ee);
+
+  for (const [name, expected] of [
+    ["mcp__serena__search_for_pattern", "🧩 Serena Search For Pattern"],
+    ["mcp__serena__initial_instructions", "🧩 Serena Initial Instructions"],
+    ["mcp__serena__activate_project", "🧩 Serena Activate Project"],
+    ["mcp__openbrain-local__search_thoughts", "🧩 Openbrain-local Search Thoughts"],
+    ["mcp__openbrain-local__capture_thought", "🧩 Openbrain-local Capture Thought"],
+  ] as const) {
+    ee.emit("message", makeStreamEvent("content_block_start", {
+      content_block: { type: "tool_use", name, id: `tu_${name}` },
+    }));
+    const snap = tracker.poll();
+    assert.ok(snap);
+    assertProgressBody(snap.text, expected);
     ee.emit("message", makeStreamEvent("content_block_start", {
       content_block: { type: "text", text: "" },
     }));
@@ -446,7 +570,7 @@ test("reports thinking after 8s silence before activity", () => {
     now += 9_000;
     const snap2 = tracker.poll();
     assert.ok(snap2, "should report thinking after 8s silence");
-    assertProgressBody(snap2.text, "thinking\u2026");
+    assertProgressBody(snap2.text, "🫧 Working: thinking\u2026");
     assert.ok(snap2.key.startsWith("thinking:"), "key should start with thinking:");
   } finally {
     tracker.detach();
@@ -498,7 +622,7 @@ test("thinking is suppressed once tool_use starts", () => {
     const snap = tracker.poll();
     // Should report tool_use, not thinking.
     assert.ok(snap);
-    assertProgressBodyMatches(snap.text, /^(?:using|waiting for) Read/);
+    assertProgressBodyMatches(snap.text, /^📖 Read/);
     assert.ok(!snap.text.includes("thinking"), "should not report thinking when tool is active");
   } finally {
     tracker.detach();
@@ -567,14 +691,14 @@ test("thinking does not override active tool phase", () => {
     }));
     const toolSnap = tracker.poll();
     assert.ok(toolSnap);
-    assert.match(toolSnap.text, /Bash/);
+    assert.match(toolSnap.text, /Exec/);
 
     // Advance past threshold. Tool is still active.
     now += 12_000;
     const snap = tracker.poll();
     // Should be the wait phase, not thinking.
     assert.ok(snap);
-    assert.match(snap.text, /waiting for Bash/);
+    assert.match(snap.text, /🛠️ Exec: 12s/);
     assert.ok(!snap.text.includes("thinking"));
   } finally {
     tracker.detach();

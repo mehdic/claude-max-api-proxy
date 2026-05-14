@@ -15,6 +15,7 @@ The installed executable remains `claude-proxy`. The proxy is designed for local
 - Caller-dispatched OpenAI tool call bridge.
 - Optional direct MCP injection for advanced local setups.
 - Optional n8n-aware progress keepalives.
+- Optional synthetic liveness progress chunks for clients with provider-event idle timeouts.
 - Optional in-memory, SQLite, and HTTP-exported traces with redaction boundaries.
 - Optional sticky Claude CLI sessions for callers that pass deterministic session metadata.
 - macOS LaunchAgent-friendly standalone server.
