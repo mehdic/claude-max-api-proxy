@@ -36,9 +36,15 @@ import { applyMcpPolicy, secretDecisionsToTrace } from "../mcp/governance.js";
 import type { TraceMcpDecision } from "../trace/types.js";
 import { parseStreamJsonLine } from "./stream-json-parser.js";
 import { pushClaudeFlagIfSupported } from "./claude-flags.js";
+import {
+  detectIntentionalWaitFromMessage,
+  detectIntentionalWaitFromResult,
+  type IntentionalWaitState,
+} from "./intentional-wait.js";
 
 const INIT_TIMEOUT_MS = 30000;
-const TURN_TIMEOUT_MS = 900000;
+const TURN_IDLE_TIMEOUT_MS = 900000;
+const TURN_ABSOLUTE_MAX_MS = 60 * 60 * 1000;
 
 /** MCP governance decisions from the last buildOptionAMcpServers() call. */
 let lastMcpDecisions: TraceMcpDecision[] = [];
@@ -256,37 +262,97 @@ export class StreamJsonSubprocess extends EventEmitter {
     };
 
     return new Promise<ClaudeCliResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      let idleTimer: NodeJS.Timeout | null = null;
+      let intentionalWait: IntentionalWaitState | null = null;
+      const absoluteTimer = setTimeout(() => {
+        settle(() => reject(new Error(`turn exceeded absolute max after ${TURN_ABSOLUTE_MAX_MS}ms`)));
+      }, TURN_ABSOLUTE_MAX_MS);
+
+      const cleanup = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        clearTimeout(absoluteTimer);
         this.turnInFlight = false;
-        reject(new Error(`turn timed out after ${TURN_TIMEOUT_MS}ms`));
-      }, TURN_TIMEOUT_MS);
+        this.off("message", onMessage);
+        this.off("result", onResult);
+        this.off("close", onClose);
+        this.off("process_activity", onProcessActivity);
+      };
+
+      const settle = (complete: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        complete();
+      };
+
+      const resetIdleTimer = () => {
+        if (settled) return;
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        // Once Claude explicitly reports a scheduled/background wait, the normal
+        // idle timer is the wrong authority: Claude may be intentionally silent
+        // until the wakeup fires. The absolute cap still prevents infinite turns.
+        if (intentionalWait) return;
+        idleTimer = setTimeout(() => {
+          settle(() => reject(new Error(`turn idle timed out after ${TURN_IDLE_TIMEOUT_MS}ms`)));
+        }, TURN_IDLE_TIMEOUT_MS);
+      };
+
+      const onMessage = (message: ClaudeCliMessage) => {
+        if (intentionalWait) {
+          // Any subsequent Claude message means the scheduled/background wait woke
+          // and the turn is active again. Restore idle protection immediately;
+          // if this message is another strict interim wait result, onResult will
+          // park the turn again below.
+          intentionalWait = null;
+          resetIdleTimer();
+        }
+
+        const detected = detectIntentionalWaitFromMessage(message);
+        if (!detected) return;
+        // Tool-use wait events are progress metadata only. They must not by
+        // themselves suppress a result or disable idle timeout; only a strict
+        // interim wait result below parks the turn.
+        this.emit("intentional_wait", detected);
+      };
 
       const onResult = (result: ClaudeCliResult) => {
-        clearTimeout(timer);
-        this.turnInFlight = false;
-        this.off("result", onResult);
-        this.off("close", onClose);
-        resolve(result);
+        if (result.is_error) {
+          settle(() => resolve(result));
+          return;
+        }
+
+        const resultWait = detectIntentionalWaitFromResult(result);
+        if (resultWait) {
+          intentionalWait = resultWait;
+          this.emit("intentional_wait", resultWait);
+          resetIdleTimer();
+          return;
+        }
+
+        settle(() => resolve(result));
       };
       const onClose = () => {
-        clearTimeout(timer);
-        this.turnInFlight = false;
-        this.off("result", onResult);
-        this.off("close", onClose);
-        reject(new Error("subprocess closed before result"));
+        settle(() => reject(new Error("subprocess closed before result")));
       };
+      const onProcessActivity = () => resetIdleTimer();
 
+      this.on("message", onMessage);
       this.on("result", onResult);
       this.on("close", onClose);
+      this.on("process_activity", onProcessActivity);
+      resetIdleTimer();
 
       try {
         this.writeLine(userMsg);
       } catch (err) {
-        clearTimeout(timer);
-        this.turnInFlight = false;
-        this.off("result", onResult);
-        this.off("close", onClose);
-        reject(err);
+        settle(() => reject(err));
       }
     });
   }
@@ -302,6 +368,7 @@ export class StreamJsonSubprocess extends EventEmitter {
   private markProcessActivity(): void {
     this.lastProcessActivityAt = Date.now();
     this.processActivityCount++;
+    this.emit("process_activity");
   }
 
   private processBuffer(): void {

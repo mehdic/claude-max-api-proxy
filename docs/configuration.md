@@ -213,6 +213,7 @@ When enabled, the proxy registers selected MCP servers directly with the inner C
 | `CLAUDE_PROXY_OPENCLAW_CONFIG` | `$HOME/.openclaw/openclaw.json` | Optional path to an OpenClaw config file whose `mcp.servers` can be imported. |
 | `CLAUDE_PROXY_MCP_ALLOW` | unset | Comma-separated allowlist of MCP server names. If set, only these servers are injected. |
 | `CLAUDE_PROXY_MCP_DENY` | unset | Comma-separated denylist of MCP server names. Deny wins over allow. |
+| `CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS` | unset | Comma-separated MCP server names whose native Claude Code tools may remain enabled even when OpenClaw offers overlapping caller-dispatched tools. Use only for trusted local tools where bypassing OpenClaw's dispatcher is acceptable. |
 
 Example:
 
@@ -222,7 +223,7 @@ CLAUDE_PROXY_MCP_ALLOW=n8n,github \
 npm start
 ```
 
-Security trade-off: direct MCP injection bypasses the caller's dispatcher. For OpenClaw, that means OpenClaw may not see those tool calls in its normal approval/audit path.
+Security trade-off: direct MCP injection bypasses the caller's dispatcher. For OpenClaw, that means OpenClaw may not see those tool calls in its normal approval/audit path. By default, when OpenClaw offers an overlapping external tool name, the proxy passes matching native MCP names to Claude Code via `--disallowedTools` so OpenClaw remains authoritative. Set `CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS=openbrain-local,serena` or similar only when you intentionally want those native MCP tools to be callable inside Claude Code.
 
 ## n8n and MCP binary paths
 
@@ -305,3 +306,18 @@ Recommended patterns:
 - Use placeholders in checked-in examples: `<HOME>`, `<path-to-n8n-mcp>`, `<n8n-api-key>`.
 - Prefer OS keychains or your automation platform's secret resolver for long-lived API keys.
 - Add local config files and trace databases to `.gitignore` before experimenting.
+
+### Scheduled wakeup / background-task waits
+
+Claude Code may intentionally park a turn with tools such as `ScheduleWakeup`, `Monitor`, or `TaskOutput` while a background command finishes. Claude Proxy treats the strict Claude Code interim status `Sleeping the loop. Will resume when ...` as an intentional wait, not a completed final answer.
+
+Behavior for `/v1/chat/completions` streaming:
+
+- the OpenAI SSE stream stays open;
+- keepalive/progress chunks continue so OpenClaw and Telegram do not drop the turn silently;
+- the Claude subprocess remains busy and is not returned to the pool;
+- a later real final `result` becomes the OpenAI final answer;
+- `is_error` results are never swallowed;
+- the existing absolute cap (`TURN_ABSOLUTE_MAX_MS`, currently 60 minutes) still terminates wedged turns.
+
+This is deliberately not a detached async protocol. If the client disconnects, the current implementation discards the worker as before and records a `client_disconnect` trace. Durable detach/reattach is a future protocol-level feature. Both chat completions and `/v1/responses` stream-json routes now share keepalive/progress, intentional-wait, and soft-dead watchdog behavior. Responses emits provider-parseable `response.in_progress` lifecycle frames for proxy progress instead of fake `response.output_text.delta` content, so aggregated text deltas still match the final `response.output_text.done` text.

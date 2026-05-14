@@ -12,10 +12,12 @@ import {
   createInterimNarrationProgressText,
   createLivenessProgressText,
   createProgressChunk,
+  createResponsesProgressFrame,
   createSseKeepaliveComment,
   hasRenderableAssistantContent,
   interimNarrationProgressEnabled,
   livenessProgressEnabled,
+  shouldSuppressSoftDeadForIntentionalWait,
 } from "../server/routes.js";
 import { attachPhaseTracker } from "../server/phase-tracker.js";
 
@@ -49,12 +51,35 @@ test("interim narration progress wraps text as progress, not plain assistant tex
   assert.strictEqual(chunk.choices[0].delta.content, text);
 });
 
+test("interim narration progress ignores incomplete sentence fragments", () => {
+  const fragment = "I found the root cause and I am now tracing the progress emission path through the route handler before applying";
+  assert.strictEqual(createInterimNarrationProgressText(fragment), "");
+});
+
 test("liveness progress is a recognizable hidden provider progress sentinel", () => {
   const text = createLivenessProgressText();
   assertProgressBody(text.trim(), "🫧 Working maybe: thinking…");
   assert.ok(hasRenderableAssistantContent(text), "liveness progress must be renderable");
   const chunk = createProgressChunk("req_live", "claude-sonnet-4", false, text);
   assert.strictEqual(chunk.choices[0].delta.content, text);
+});
+
+test("intentional wait only suppresses soft-dead after strict result-text detection", () => {
+  assert.equal(shouldSuppressSoftDeadForIntentionalWait(null), false);
+  assert.equal(shouldSuppressSoftDeadForIntentionalWait({
+    kind: "schedule_wakeup",
+    reason: "Claude scheduled a wakeup/background continuation",
+    detectedBy: "tool_use",
+    toolName: "ScheduleWakeup",
+    startedAt: 1000,
+  }), false);
+  assert.equal(shouldSuppressSoftDeadForIntentionalWait({
+    kind: "schedule_wakeup",
+    reason: "Claude scheduled a wakeup/background continuation",
+    detectedBy: "result_text",
+    toolName: "ScheduleWakeup",
+    startedAt: 1000,
+  }), true);
 });
 
 test("renderable-content helper rejects empty, whitespace, and ZWSP-only text", () => {
@@ -70,6 +95,25 @@ test("createProgressChunk preserves visible progress content", () => {
   const delta = chunk.choices[0].delta;
   assert.strictEqual(delta.role, undefined);
   assert.strictEqual(delta.content, "progress: running");
+});
+
+test("createResponsesProgressFrame emits provider-parseable Responses lifecycle progress without text delta corruption", () => {
+  const frame = createResponsesProgressFrame("resp_test", "claude-sonnet-4", "progress: still running");
+  assert.ok(frame.startsWith("event: response.in_progress\n"));
+  const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+  assert.ok(dataLine, "frame must contain an SSE data line");
+  const payload = JSON.parse(dataLine.slice("data: ".length));
+  assert.strictEqual(payload.type, "response.in_progress");
+  assert.strictEqual(payload.response.id, "resp_test");
+  assert.strictEqual(payload.response.status, "in_progress");
+  assert.strictEqual(payload.response.metadata.proxy_progress, "progress: still running");
+  assert.equal(frame.includes("response.output_text.delta"), false);
+});
+
+test("createResponsesProgressFrame refuses non-renderable progress", () => {
+  assert.throws(() => createResponsesProgressFrame("resp_test", "claude-sonnet-4", ""), /renderable progress text/);
+  assert.throws(() => createResponsesProgressFrame("resp_test", "claude-sonnet-4", "\u200B"), /renderable progress text/);
+  assert.throws(() => createResponsesProgressFrame("resp_test", "claude-sonnet-4", "   "), /renderable progress text/);
 });
 
 test("createProgressChunk can include the assistant role on the first visible chunk", () => {

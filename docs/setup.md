@@ -189,8 +189,10 @@ curl -s http://127.0.0.1:3456/health | jq .
 Restart after updates:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.claude-proxy
+/Users/mehdichaouachi/.openclaw/scripts/claude-proxy-safe-restart.sh
 ```
+
+Avoid bare `launchctl kickstart -k` after plist or environment changes: macOS restarts the already-loaded job definition and may keep stale `EnvironmentVariables`. The safe restart wrapper always `bootout`/`bootstrap`s the plist from disk before `kickstart` and verifies the live process env.
 
 Unload:
 
@@ -206,7 +208,7 @@ git pull --ff-only
 npm install
 npm run build
 npm test
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.claude-proxy  # if using LaunchAgent
+/Users/mehdichaouachi/.openclaw/scripts/claude-proxy-safe-restart.sh  # if using LaunchAgent
 ```
 
 ## 7. Local verification scripts
@@ -258,3 +260,7 @@ For services, set `CLAUDE_PROXY_RUNTIME=print` in the LaunchAgent and restart.
 ### n8n MCP binary not found
 
 If using optional MCP injection with n8n, set `CLAUDE_PROXY_N8N_MCP_BIN` to the absolute path of `n8n-mcp`. See [Configuration](configuration.md#n8n-and-mcp-binary-paths).
+
+### Long background waits
+
+If Claude Code says `Sleeping the loop. Will resume when ...`, Claude Proxy keeps the chat-completions request open instead of finalizing on that interim status. Operators should still avoid restarting Claude Proxy during active long waits because the subprocess owns the parked turn until the final result arrives.

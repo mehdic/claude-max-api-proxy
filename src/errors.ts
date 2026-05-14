@@ -30,6 +30,7 @@ export type ProtocolErrorClass =
   | "context_length"
   // Client errors
   | "invalid_request"
+  | "client_disconnect"
   // Proxy internal
   | "internal_error"
   // Unknown / catch-all
@@ -47,7 +48,11 @@ export function classifyError(err: unknown): ProtocolErrorClass {
   // Stream-layer faults (transport)
   if (msg.includes("init handshake timed out")) return "init_handshake_timeout";
   if (msg.includes("subprocess closed before result")) return "worker_died";
-  if (msg.includes("turn timed out")) return "turn_timeout";
+  if (
+    msg.includes("turn timed out")
+    || msg.includes("turn idle timed out")
+    || msg.includes("turn exceeded absolute max")
+  ) return "turn_timeout";
   if (msg.includes("claude cli not found") || msg.includes("enoent")) return "spawn_enoent";
   if (msg.includes("stdin not writable")) return "stdin_closed";
   if (msg.includes("subprocess not initialized") || msg.includes("subprocess is dead")) return "worker_invalid";

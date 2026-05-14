@@ -101,12 +101,19 @@ export interface ClaudeCliStreamEvent {
     type: "message_start" | "content_block_start" | "content_block_delta" | "content_block_stop" | "message_delta" | "message_stop";
     index?: number;
     delta?: {
-      type: "text_delta";
-      text: string;
+      type: "text_delta" | "input_json_delta" | "thinking_delta";
+      text?: string;
+      partial_json?: string;
+      thinking?: string;
     };
     content_block?: {
-      type: "text";
-      text: string;
+      type: "text" | "tool_use" | "thinking";
+      text?: string;
+      name?: string;
+      id?: string;
+      input?: unknown;
+      thinking?: string;
+      signature?: string;
     };
     message?: {
       model: string;

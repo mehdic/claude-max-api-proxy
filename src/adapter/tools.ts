@@ -65,6 +65,16 @@ function allowedToolNames(req: Pick<OpenAIChatRequest, "tools" | "tool_choice">)
   return all;
 }
 
+function nativeMcpOverlapAllowSet(): Set<string> {
+  const raw = process.env.CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS || "";
+  return new Set(raw.split(",").map((part) => part.trim()).filter(Boolean));
+}
+
+function isNativeMcpOverlapAllowed(server: string): boolean {
+  const allowed = nativeMcpOverlapAllowSet();
+  return allowed.has("*") || allowed.has(server);
+}
+
 export function externalNativeToolDisallowList(req: Pick<OpenAIChatRequest, "tools" | "tool_choice">): string[] {
   if (!shouldBridgeExternalTools(req)) return [];
   const names = Array.from(allowedToolNames(req));
@@ -74,6 +84,7 @@ export function externalNativeToolDisallowList(req: Pick<OpenAIChatRequest, "too
     const marker = name.indexOf("__");
     if (marker > 0) {
       const server = name.slice(0, marker);
+      if (isNativeMcpOverlapAllowed(server)) continue;
       const tool = name.slice(marker + 2);
       disallowed.add(`mcp__${server}__${tool}`);
       disallowed.add(`mcp__${server}__${name}`);
@@ -93,6 +104,11 @@ export function toolDefsToPrompt(req: Pick<OpenAIChatRequest, "tools" | "tool_ch
       parameters: tool.function.parameters || { type: "object" },
     }));
 
+  const nativeOverlapAllowed = nativeMcpOverlapAllowSet();
+  const nativeOverlapNote = nativeOverlapAllowed.size > 0
+    ? `Native MCP overlap allowlist is active for: ${Array.from(nativeOverlapAllowed).sort().join(", ")}. For these servers, you may use the native MCP/Claude Code tool directly when it is the better fit; otherwise return the JSON tool_call so the caller can dispatch it under its own audit and approval controls.`
+    : "If a listed external tool resembles or overlaps a native MCP/Claude Code tool name, do NOT invoke the native tool for this request. Return the JSON tool_call so the caller can dispatch it under its own audit and approval controls.";
+
   const choice = req.tool_choice && typeof req.tool_choice === "object"
     ? `The caller explicitly requested external tool ${req.tool_choice.function.name}; use that external tool if a tool call is needed.`
     : req.tool_choice === "required"
@@ -102,7 +118,7 @@ export function toolDefsToPrompt(req: Pick<OpenAIChatRequest, "tools" | "tool_ch
   return `<claude_proxy_openai_tools>
 The following external OpenAI/OpenClaw tools are available in addition to your native Claude Code capabilities/tools.
 These external tools are dispatched by the caller (for example OpenClaw); the proxy will not execute them for you.
-If a listed external tool resembles or overlaps a native MCP/Claude Code tool name, do NOT invoke the native tool for this request. Return the JSON tool_call so the caller can dispatch it under its own audit and approval controls.
+${nativeOverlapNote}
 To request one external tool, return ONLY a valid JSON object in this exact shape:
 {"tool_call":{"name":"tool_name","arguments":{}}}
 Use one of the external tool names listed below and fill arguments according to its schema.

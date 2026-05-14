@@ -53,6 +53,7 @@ import { traceStore } from "../trace/store.js";
 import { detectOverlappingTools, isMcpInjectionEnabled, mcpGovernanceSummary } from "../mcp/governance.js";
 import { getClaudeCliCapabilities } from "../subprocess/claude-flags.js";
 import { attachPhaseTracker } from "./phase-tracker.js";
+import { formatIntentionalWaitStatus, type IntentionalWaitState } from "../subprocess/intentional-wait.js";
 
 const FALLBACK_ENABLED = process.env.CLAUDE_PROXY_FALLBACK_ON_STREAM_FAILURE === "1";
 
@@ -117,11 +118,42 @@ export function interimNarrationProgressEnabled(env: NodeJS.ProcessEnv = process
   return env.CLAUDE_PROXY_INTERIM_NARRATION_PROGRESS === "1";
 }
 
+function endsAtNaturalNarrationBoundary(text: string): boolean {
+  return /(?:[.!?…][)"'\]]*|\n)\s*$/.test(text);
+}
+
 export function createInterimNarrationProgressText(text: string): string {
+  if (!endsAtNaturalNarrationBoundary(text)) return "";
   const compact = text.replace(/\s+/g, " ").trim();
   if (!compact) return "";
   const shortened = compact.length > 240 ? `${compact.slice(0, 237)}…` : compact;
   return `\nBubbling...\n🧠 Thinking: ${shortened}\n`;
+}
+
+export const EMPTY_FINAL_RESPONSE_FALLBACK = "Claude finished without a final answer. I only received progress updates from the underlying Claude Code run.";
+
+export function resolveStreamJsonFinalText(params: {
+  resultText?: string | null;
+  assistantMessageText?: string | null;
+  contentDeltaText?: string | null;
+  allowContentDeltaFallback?: boolean;
+}): { text: string; source: "result_text" | "assistant_message" | "buffered_text" | "fallback"; usedFallback: boolean } {
+  const resultText = params.resultText?.trim();
+  if (resultText) return { text: resultText, source: "result_text", usedFallback: false };
+
+  const assistantMessageText = params.assistantMessageText?.trim();
+  if (assistantMessageText) return { text: assistantMessageText, source: "assistant_message", usedFallback: false };
+
+  const contentDeltaText = params.contentDeltaText?.trim();
+  if (params.allowContentDeltaFallback && contentDeltaText) {
+    return { text: contentDeltaText, source: "buffered_text", usedFallback: false };
+  }
+
+  return { text: EMPTY_FINAL_RESPONSE_FALLBACK, source: "fallback", usedFallback: true };
+}
+
+export function shouldSuppressSoftDeadForIntentionalWait(state: IntentionalWaitState | null): state is IntentionalWaitState {
+  return state?.detectedBy === "result_text";
 }
 
 export function hasRenderableAssistantContent(text: string): boolean {
@@ -151,6 +183,28 @@ export function createProgressChunk(
       finish_reason: null,
     }],
   };
+}
+
+export function createResponsesProgressFrame(responseId: string, model: string, content: string): string {
+  if (!hasRenderableAssistantContent(content)) {
+    throw new Error("responses progress frame content must be renderable progress text");
+  }
+  // Do not encode proxy progress as response.output_text.delta: strict Responses
+  // clients expect concatenated text deltas to match response.output_text.done.
+  // response.in_progress is a provider-parseable lifecycle event that keeps the
+  // stream active without corrupting the assistant's final text.
+  return `event: response.in_progress\ndata: ${JSON.stringify({
+    type: "response.in_progress",
+    response: {
+      id: responseId,
+      object: "response",
+      created_at: Math.floor(Date.now() / 1000),
+      model,
+      output: [],
+      status: "in_progress",
+      metadata: { proxy_progress: content.trim() },
+    },
+  })}\n\n`;
 }
 
 /**
@@ -659,6 +713,7 @@ async function handleStreamJsonRequest(
 
   let subprocess: Awaited<ReturnType<typeof acquirePreInit>>;
   let userText = cliInput.prompt;
+  let subprocessReleased = false;
   let releaseSuccess: (assistantText: string) => void;
   let releaseDiscard: (reason: StickyEvictionReason) => void;
 
@@ -683,16 +738,30 @@ async function handleStreamJsonRequest(
       ttlSeconds: sticky.ttlSeconds,
       turnCount: sticky.turnCount,
     });
-    releaseSuccess = (text) => sticky.release({ status: "success", assistantText: text });
+    releaseSuccess = (text) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      sticky.release({ status: "success", assistantText: text });
+    };
     releaseDiscard = (reason) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
       tb.setStickyEviction(reason);
       sticky.release({ status: "discard", reason });
     };
   } else if (sessionOptions.mode === "stateless") {
     subprocess = await acquireStatelessStreamJson(model, cliInput.disallowedTools);
     tb.setSessionWarmHit(false);
-    releaseSuccess = () => subprocess.kill();
-    releaseDiscard = () => subprocess.kill();
+    releaseSuccess = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      subprocess.kill();
+    };
+    releaseDiscard = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      subprocess.kill();
+    };
   } else {
     const acquired = await acquireSession(model, body.messages, { disallowedTools: cliInput.disallowedTools });
     subprocess = acquired.subprocess;
@@ -701,8 +770,16 @@ async function handleStreamJsonRequest(
     userText = acquired.isWarm
       ? (bridgeTools ? messagesToPrompt([lastMessage], body) : acquired.lastUserText)
       : cliInput.prompt;
-    releaseSuccess = (assistantText) => returnSession(subprocess, model, body.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
-    releaseDiscard = () => discardSession(subprocess);
+    releaseSuccess = (assistantText) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      returnSession(subprocess, model, body.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
+    };
+    releaseDiscard = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      discardSession(subprocess);
+    };
   }
 
   tb.setBridgeTools(bridgeTools, body);
@@ -723,6 +800,7 @@ async function handleStreamJsonRequest(
   let isFirst = true;
   let lastModel = "claude-sonnet-4";
   let assistantText = "";
+  let assistantMessageText = "";
   let bridgeTextBuffer = "";
   let bridgeTextStreaming = false;
   let streamedAssistantText = false;
@@ -745,6 +823,13 @@ async function handleStreamJsonRequest(
   let lastReportedExecution = "";
 
   const phaseTracker = attachPhaseTracker(subprocess);
+  let intentionalWaitState: IntentionalWaitState | null = null;
+  let lastIntentionalWaitProgressKey = "";
+  const onIntentionalWait = (state: IntentionalWaitState) => {
+    intentionalWaitState = state;
+    console.error(`[StreamJson] intentional wait req_id=${requestId} kind=${state.kind} detectedBy=${state.detectedBy} tool=${state.toolName || ""}`);
+  };
+  subprocess.on("intentional_wait", onIntentionalWait);
 
   const writeKeepaliveChunk = async () => {
     if (res.writableEnded) return;
@@ -774,7 +859,19 @@ async function handleStreamJsonRequest(
       }
     }
 
-    // Priority 3: when final-only assistant text streaming is active, keep
+    // Priority 3: Claude explicitly parked or is preparing to park the turn
+    // waiting for wakeup/background completion. Emit at most once per 30s bucket.
+    if (!hasRenderableAssistantContent(content) && intentionalWaitState) {
+      const waitText = formatIntentionalWaitStatus(intentionalWaitState);
+      const waitKey = `${intentionalWaitState.kind}:${intentionalWaitState.detectedBy}:${Math.floor((Date.now() - intentionalWaitState.startedAt) / 30_000)}`;
+      if (waitKey !== lastIntentionalWaitProgressKey) {
+        content = `\nBubbling...\n🫧 Working: ${waitText}\n`;
+        lastIntentionalWaitProgressKey = waitKey;
+        mode = "progress";
+      }
+    }
+
+    // Priority 4: when final-only assistant text streaming is active, keep
     // OpenClaw's provider-event idle watchdog alive with a progress data chunk.
     // SSE comments keep the HTTP socket warm but OpenClaw strips comment-only
     // frames before provider parsing, so comments alone do not reset model idle.
@@ -808,8 +905,13 @@ async function handleStreamJsonRequest(
     void writeKeepaliveChunk();
   }
 
-  // Layer 2: track ANY claude event for observability only.
+  // Layer 2: track ANY claude event for observability and clear parked-wait
+  // watchdog suppression as soon as Claude resumes emitting messages.
   const onAnyClaudeEvent = () => {
+    if (shouldSuppressSoftDeadForIntentionalWait(intentionalWaitState)) {
+      console.error(`[StreamJson] intentional wait resumed req_id=${requestId} kind=${intentionalWaitState.kind} waitAgeMs=${Date.now() - intentionalWaitState.startedAt}`);
+      intentionalWaitState = null;
+    }
     lastClaudeActivityAt = Date.now();
   };
   subprocess.on("message", onAnyClaudeEvent);
@@ -839,6 +941,12 @@ async function handleStreamJsonRequest(
     const silenceMs = now - lastClaudeActivityAt;
     if (silenceMs >= UPSTREAM_SOFT_DEAD_MS && snap.pid) {
       descendants = sampleDescendants(snap.pid);
+    }
+
+    const waitStateForWatchdog = intentionalWaitState;
+    if (shouldSuppressSoftDeadForIntentionalWait(waitStateForWatchdog)) {
+      console.error(`[StreamJson] watchdog suppressed during intentional wait req_id=${requestId} kind=${waitStateForWatchdog.kind} detectedBy=${waitStateForWatchdog.detectedBy} waitAgeMs=${now - waitStateForWatchdog.startedAt}`);
+      return;
     }
 
     if (!shouldTriggerSoftDead(lastClaudeActivityAt, snap, now, descendants)) return;
@@ -877,7 +985,7 @@ async function handleStreamJsonRequest(
   }, WATCHDOG_CHECK_MS);
   const stopWatchdog = () => clearInterval(watchdogTimer);
 
-  const writeContentChunk = (text: string) => {
+  const writeContentChunk = (text: string, options: { assistantText?: boolean } = { assistantText: true }) => {
     if (!stream || res.writableEnded || !text) return;
     const chunk = {
       id: `chatcmpl-${requestId}`,
@@ -892,7 +1000,7 @@ async function handleStreamJsonRequest(
     };
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     isFirst = false;
-    streamedAssistantText = true;
+    if (options.assistantText !== false) streamedAssistantText = true;
     lastClientActivityAt = Date.now();
   };
 
@@ -911,11 +1019,11 @@ async function handleStreamJsonRequest(
     if (!streamAssistantTextDeltas) {
       if (emitInterimNarrationProgress && stream && !res.writableEnded) {
         interimNarrationBuffer += text;
-        const shouldFlush = /[.!?]\s$|\n$/.test(interimNarrationBuffer) || interimNarrationBuffer.length >= 180;
+        const shouldFlush = endsAtNaturalNarrationBoundary(interimNarrationBuffer);
         if (shouldFlush) {
           const progress = createInterimNarrationProgressText(interimNarrationBuffer);
           interimNarrationBuffer = "";
-          if (progress) writeContentChunk(progress);
+          if (progress) writeContentChunk(progress, { assistantText: false });
         }
       }
       return;
@@ -940,8 +1048,10 @@ async function handleStreamJsonRequest(
 
   const onAssistant = (m: ClaudeCliAssistant) => {
     lastModel = m.message.model;
-    // Capture full text in case streaming deltas were missed.
-    if (!assistantText) assistantText = extractTextContent(m);
+    const text = extractTextContent(m);
+    if (text) assistantMessageText = text;
+    // Capture full text in case streaming deltas were missed in legacy/live-delta mode.
+    if (!assistantText) assistantText = text;
   };
 
   subprocess.on("content_delta", onContentDelta);
@@ -949,7 +1059,10 @@ async function handleStreamJsonRequest(
 
   res.on("close", () => {
     if (!done) {
+      done = true;
       console.error(`[StreamJson] client disconnected pre-completion req_id=${requestId} keepalives=${keepaliveCount} lastClientIdleMs=${Date.now() - lastClientActivityAt} lastClaudeIdleMs=${Date.now() - lastClaudeActivityAt}`);
+      tb.setError("client_disconnect", "client disconnected before stream completion");
+      tb.commit();
       releaseDiscard("client_disconnect");
     }
   });
@@ -960,13 +1073,19 @@ async function handleStreamJsonRequest(
     console.error(`[StreamJson] submit complete req_id=${requestId} keepalives=${keepaliveCount} durationMs=${Date.now() - requestStartAt}`);
     annotateAndRecordUsage(result, model);
 
-    const rawText = result.result || assistantText;
+    const finalText = resolveStreamJsonFinalText({
+      resultText: result.result,
+      assistantMessageText,
+      contentDeltaText: assistantText,
+      allowContentDeltaFallback: streamAssistantTextDeltas,
+    });
+    const rawText = finalText.text;
     const parsed = parseToolCalls(rawText, body);
     recordToolCallParseOutcome(parsed, bridgeTools);
 
     const finishReason = parsed.toolCalls.length > 0 ? "tool_calls" as const : "stop" as const;
     tb.setFinishReason(finishReason);
-    tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
+    tb.setToolCallParseSource(finalText.source === "result_text" ? "result_text" : "buffered_text");
     for (const tc of parsed.toolCalls) tb.addToolCall(tc);
     recordUsageOnTrace(tb, result);
     tb.commit();
@@ -975,7 +1094,7 @@ async function handleStreamJsonRequest(
       if (!streamAssistantTextDeltas && emitInterimNarrationProgress && interimNarrationBuffer) {
         const progress = createInterimNarrationProgressText(interimNarrationBuffer);
         interimNarrationBuffer = "";
-        if (progress) writeContentChunk(progress);
+        if (progress) writeContentChunk(progress, { assistantText: false });
       }
       const usage = body.stream_options?.include_usage === true ? resultUsageToOpenAI(result) : undefined;
       if (parsed.toolCalls.length > 0) {
@@ -997,10 +1116,10 @@ async function handleStreamJsonRequest(
     }
 
     // Re-pool or retain the subprocess for the next turn according to session mode.
-    releaseSuccess(assistantText);
+    releaseSuccess(parsed.toolCalls.length > 0 ? rawText : parsed.textContent);
   } catch (err) {
-    // If the watchdog already fired and handled cleanup, skip duplicate work.
-    if (watchdogFired) return;
+    // If another path already handled cleanup, skip duplicate release/error writes.
+    if (watchdogFired || subprocessReleased) return;
     done = true;
     releaseDiscard("turn_error");
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -1018,6 +1137,7 @@ async function handleStreamJsonRequest(
     stopWatchdog();
     n8nDetector.detach();
     phaseTracker.detach();
+    subprocess.off("intentional_wait", onIntentionalWait);
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
     subprocess.off("message", onAnyClaudeEvent);
@@ -1199,6 +1319,7 @@ async function handleResponsesStreamJson(
 
   let subprocess: Awaited<ReturnType<typeof acquirePreInit>>;
   let userText = cliInput.prompt;
+  let subprocessReleased = false;
   let releaseSuccess: (assistantText: string) => void;
   let releaseDiscard: (reason: StickyEvictionReason) => void;
 
@@ -1223,16 +1344,30 @@ async function handleResponsesStreamJson(
       ttlSeconds: sticky.ttlSeconds,
       turnCount: sticky.turnCount,
     });
-    releaseSuccess = (text) => sticky.release({ status: "success", assistantText: text });
+    releaseSuccess = (text) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      sticky.release({ status: "success", assistantText: text });
+    };
     releaseDiscard = (reason) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
       tb.setStickyEviction(reason);
       sticky.release({ status: "discard", reason });
     };
   } else if (sessionOptions.mode === "stateless") {
     subprocess = await acquireStatelessStreamJson(model, cliInput.disallowedTools);
     tb.setSessionWarmHit(false);
-    releaseSuccess = () => subprocess.kill();
-    releaseDiscard = () => subprocess.kill();
+    releaseSuccess = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      subprocess.kill();
+    };
+    releaseDiscard = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      subprocess.kill();
+    };
   } else {
     const acquired = await acquireSession(model, chatReq.messages, { disallowedTools: cliInput.disallowedTools });
     subprocess = acquired.subprocess;
@@ -1241,8 +1376,16 @@ async function handleResponsesStreamJson(
     userText = acquired.isWarm
       ? (bridgeTools ? messagesToPrompt([lastMessage], chatReq) : acquired.lastUserText)
       : cliInput.prompt;
-    releaseSuccess = (assistantText) => returnSession(subprocess, model, chatReq.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
-    releaseDiscard = () => discardSession(subprocess);
+    releaseSuccess = (assistantText) => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      returnSession(subprocess, model, chatReq.messages, assistantText, { disallowedTools: cliInput.disallowedTools });
+    };
+    releaseDiscard = () => {
+      if (subprocessReleased) return;
+      subprocessReleased = true;
+      discardSession(subprocess);
+    };
   }
 
   recordMcpGovernanceOnTrace(tb, subprocess, chatReq);
@@ -1250,8 +1393,21 @@ async function handleResponsesStreamJson(
   const responseId = `resp_${requestId}`;
   const msgId = `msg_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
   let assistantText = "";
+  let assistantMessageText = "";
+  let bridgeTextBuffer = "";
+  let bridgeTextStreaming = false;
   let lastModel = requestModel;
   let done = false;
+  let streamedAssistantText = false;
+  const streamAssistantTextDeltas = process.env.CLAUDE_PROXY_STREAM_ASSISTANT_DELTAS === "1";
+  const emitLivenessProgress = livenessProgressEnabled();
+  const emitInterimNarrationProgress = interimNarrationProgressEnabled();
+  let interimNarrationBuffer = "";
+  let keepaliveCount = 0;
+  const requestStartAt = Date.now();
+  let lastClaudeActivityAt = Date.now();
+  let lastClientActivityAt = Date.now();
+  console.error(`[Responses StreamJson] request start req_id=${requestId} trace_id=${tb.traceId} model=${model} runtime=stream-json stream=${stream} bridgeTools=${bridgeTools}`);
 
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
@@ -1264,40 +1420,236 @@ async function handleResponsesStreamJson(
     res.write(`event: response.created\ndata: ${envelope.created}\n\n`);
     res.write(`event: response.output_item.added\ndata: ${envelope.itemAdded}\n\n`);
     res.write(`event: response.content_part.added\ndata: ${envelope.partAdded}\n\n`);
+    res.write(createSseKeepaliveComment(requestId, 0));
   } else {
     setTraceHeader(res, tb.traceId);
   }
+
+  // -------------------- Keepalive ---------------------
+  const KEEPALIVE_GAP_MS = 10_000;
+  const KEEPALIVE_CHECK_MS = 5_000;
+
+  const n8nDetector = attachN8nDetector(subprocess);
+  let lastReportedExecution = "";
+
+  const phaseTracker = attachPhaseTracker(subprocess);
+  let intentionalWaitState: IntentionalWaitState | null = null;
+  let lastIntentionalWaitProgressKey = "";
+  const onIntentionalWait = (state: IntentionalWaitState) => {
+    intentionalWaitState = state;
+    console.error(`[Responses StreamJson] intentional wait req_id=${requestId} kind=${state.kind} detectedBy=${state.detectedBy} tool=${state.toolName || ""}`);
+  };
+  subprocess.on("intentional_wait", onIntentionalWait);
+
+  const writeKeepaliveChunk = async () => {
+    if (res.writableEnded) return;
+    keepaliveCount++;
+    let content = "";
+    let mode: "comment" | "progress" | "phase" = "comment";
+
+    if (n8nProgressEnabled() && n8nDetector.isInFlight()) {
+      const snap = await getRunningExecution();
+      if (snap) {
+        const line = formatProgress(snap);
+        if (snap.executionId !== lastReportedExecution) {
+          content = "\n" + line + "\n";
+          lastReportedExecution = snap.executionId;
+          mode = "progress";
+        }
+      }
+    }
+
+    if (!hasRenderableAssistantContent(content)) {
+      const phase = phaseTracker.poll();
+      if (phase) {
+        content = "\n" + phase.text + "\n";
+        mode = "phase";
+      }
+    }
+
+    if (!hasRenderableAssistantContent(content) && intentionalWaitState) {
+      const waitText = formatIntentionalWaitStatus(intentionalWaitState);
+      const waitKey = `${intentionalWaitState.kind}:${intentionalWaitState.detectedBy}:${Math.floor((Date.now() - intentionalWaitState.startedAt) / 30_000)}`;
+      if (waitKey !== lastIntentionalWaitProgressKey) {
+        content = `\nBubbling...\n🫧 Working: ${waitText}\n`;
+        lastIntentionalWaitProgressKey = waitKey;
+        mode = "progress";
+      }
+    }
+
+    if (!hasRenderableAssistantContent(content) && emitLivenessProgress && !streamAssistantTextDeltas && keepaliveCount > 1) {
+      content = createLivenessProgressText();
+      mode = "progress";
+    }
+
+    if (hasRenderableAssistantContent(content)) {
+      res.write(createResponsesProgressFrame(responseId, lastModel, content));
+    } else {
+      res.write(createSseKeepaliveComment(requestId, keepaliveCount));
+    }
+    lastClientActivityAt = Date.now();
+    console.error(`[Responses StreamJson] keepalive req_id=${requestId} count=${keepaliveCount} mode=${mode} bridgeTools=${bridgeTools} contentBytes=${Buffer.byteLength(content, "utf8")}`);
+  };
+
+  if (stream && !res.writableEnded) {
+    void writeKeepaliveChunk();
+  }
+
+  const onAnyClaudeEvent = () => {
+    if (shouldSuppressSoftDeadForIntentionalWait(intentionalWaitState)) {
+      console.error(`[Responses StreamJson] intentional wait resumed req_id=${requestId} kind=${intentionalWaitState.kind} waitAgeMs=${Date.now() - intentionalWaitState.startedAt}`);
+      intentionalWaitState = null;
+    }
+    lastClaudeActivityAt = Date.now();
+  };
+  subprocess.on("message", onAnyClaudeEvent);
+
+  const keepaliveTimer = stream
+    ? setInterval(() => {
+        if (done || res.writableEnded) return;
+        if (Date.now() - lastClientActivityAt >= KEEPALIVE_GAP_MS) {
+          void writeKeepaliveChunk();
+        }
+      }, KEEPALIVE_CHECK_MS)
+    : null;
+  const stopKeepalive = () => {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+  };
+
+  // -------------------- Upstream Soft-Dead Watchdog ---------------------
+  const WATCHDOG_CHECK_MS = 30_000;
+  let watchdogFired = false;
+  const watchdogTimer = setInterval(() => {
+    if (done || watchdogFired) return;
+    const snap = subprocess.snapshot();
+
+    let descendants: DescendantInfo | null = null;
+    const now = Date.now();
+    const silenceMs = now - lastClaudeActivityAt;
+    if (silenceMs >= UPSTREAM_SOFT_DEAD_MS && snap.pid) {
+      descendants = sampleDescendants(snap.pid);
+    }
+
+    const waitStateForWatchdog = intentionalWaitState;
+    if (shouldSuppressSoftDeadForIntentionalWait(waitStateForWatchdog)) {
+      console.error(`[Responses StreamJson] watchdog suppressed during intentional wait req_id=${requestId} kind=${waitStateForWatchdog.kind} detectedBy=${waitStateForWatchdog.detectedBy} waitAgeMs=${now - waitStateForWatchdog.startedAt}`);
+      return;
+    }
+
+    if (!shouldTriggerSoftDead(lastClaudeActivityAt, snap, now, descendants)) return;
+
+    watchdogFired = true;
+    done = true;
+    const diag = buildSoftDeadDiagnostic(requestId, lastClaudeActivityAt, snap, now, {
+      model,
+      runtime: "stream-json",
+      stream,
+      bridgeTools,
+      lastClientActivityAgeMs: now - lastClientActivityAt,
+      lastClaudeActivityAgeMs: now - lastClaudeActivityAt,
+      childPid: snap.pid,
+      processActivityCount: snap.processActivityCount,
+      watchdogAction: "kill",
+      descendantCount: descendants?.count,
+      descendantCpuPct: descendants?.totalCpuPct,
+    });
+    console.error(`[Responses StreamJson] WATCHDOG ${diag.reason} req_id=${requestId} model=${model} stream=${stream} bridgeTools=${bridgeTools} silenceMs=${diag.silenceMs} lastClientAgeMs=${diag.context?.lastClientActivityAgeMs} lastClaudeAgeMs=${diag.context?.lastClaudeActivityAgeMs} pid=${snap.pid} processActivityCount=${snap.processActivityCount} descendants=${descendants ? `count=${descendants.count},running=${descendants.running},cpu=${descendants.totalCpuPct}%` : "none"} action=kill+discard`);
+
+    tb.setError("upstream_soft_dead", `upstream ${diag.reason}: silent for ${Math.round(diag.silenceMs / 1000)}s`);
+    tb.commit();
+
+    releaseDiscard("watchdog");
+
+    if (stream && !res.writableEnded) {
+      const errMsg = `upstream ${diag.reason}: Claude CLI silent for ${Math.round(diag.silenceMs / 1000)}s`;
+      res.write(`event: error\ndata: ${JSON.stringify({ error: { message: errMsg, type: "server_error", code: "upstream_dead" } })}\n\n`);
+      res.end();
+    } else if (!stream && !res.headersSent) {
+      const errMsg = `upstream ${diag.reason}: Claude CLI silent for ${Math.round(diag.silenceMs / 1000)}s`;
+      res.status(504).json({ error: { message: errMsg, type: "server_error", code: "upstream_dead" } });
+    }
+  }, WATCHDOG_CHECK_MS);
+  const stopWatchdog = () => clearInterval(watchdogTimer);
+
+  const writeTextDelta = (text: string, options: { assistantText?: boolean } = { assistantText: true }) => {
+    if (!stream || res.writableEnded || !text) return;
+    res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+    if (options.assistantText !== false) streamedAssistantText = true;
+    lastClientActivityAt = Date.now();
+  };
 
   const onContentDelta = (event: ClaudeCliStreamEvent) => {
     const text = event.event.delta?.text || "";
     if (!text) return;
     assistantText += text;
-    if (stream && !bridgeTools && !res.writableEnded) {
-      res.write(`event: response.output_text.delta\ndata: ${buildTextDeltaEvent(text)}\n\n`);
+    lastClaudeActivityAt = Date.now();
+
+    if (!streamAssistantTextDeltas) {
+      if (emitInterimNarrationProgress && stream && !res.writableEnded) {
+        interimNarrationBuffer += text;
+        const shouldFlush = endsAtNaturalNarrationBoundary(interimNarrationBuffer);
+        if (shouldFlush) {
+          const progress = createInterimNarrationProgressText(interimNarrationBuffer);
+          interimNarrationBuffer = "";
+          if (progress) writeTextDelta(progress, { assistantText: false });
+        }
+      }
+      return;
     }
+
+    if (bridgeTools) {
+      if (!stream || res.writableEnded) return;
+      if (bridgeTextStreaming) {
+        writeTextDelta(text);
+        return;
+      }
+      bridgeTextBuffer += text;
+      if (!shouldHoldBridgeToolStreamText(bridgeTextBuffer)) {
+        bridgeTextStreaming = true;
+        writeTextDelta(bridgeTextBuffer);
+        bridgeTextBuffer = "";
+      }
+      return;
+    }
+    writeTextDelta(text);
   };
   const onAssistant = (message: ClaudeCliAssistant) => {
     lastModel = message.message.model;
-    if (!assistantText) assistantText = extractTextContent(message);
+    const text = extractTextContent(message);
+    if (text) assistantMessageText = text;
+    if (!assistantText) assistantText = text;
   };
 
   subprocess.on("content_delta", onContentDelta);
   subprocess.on("assistant", onAssistant);
 
   res.on("close", () => {
-    if (!done) releaseDiscard("client_disconnect");
+    if (!done) {
+      done = true;
+      console.error(`[Responses StreamJson] client disconnected pre-completion req_id=${requestId} keepalives=${keepaliveCount} lastClientIdleMs=${Date.now() - lastClientActivityAt} lastClaudeIdleMs=${Date.now() - lastClaudeActivityAt}`);
+      tb.setError("client_disconnect", "client disconnected before stream completion");
+      tb.commit();
+      releaseDiscard("client_disconnect");
+    }
   });
 
   try {
     const result = await subprocess.submitTurn(userText);
     done = true;
+    console.error(`[Responses StreamJson] submit complete req_id=${requestId} keepalives=${keepaliveCount} durationMs=${Date.now() - requestStartAt}`);
     annotateAndRecordUsage(result, cliInput.model);
-    const resultForAdapters: ClaudeCliResult = { ...result, result: result.result || assistantText };
-    const rawText = resultForAdapters.result || assistantText;
+    const finalText = resolveStreamJsonFinalText({
+      resultText: result.result,
+      assistantMessageText,
+      contentDeltaText: assistantText,
+      allowContentDeltaFallback: streamAssistantTextDeltas,
+    });
+    const rawText = finalText.text;
+    const resultForAdapters: ClaudeCliResult = { ...result, result: rawText };
     const parsed = parseToolCalls(rawText, chatReq);
 
     tb.setFinishReason(parsed.toolCalls.length > 0 ? "tool_calls" : "stop");
-    tb.setToolCallParseSource(result.result ? "result_text" : "buffered_text");
+    tb.setToolCallParseSource(finalText.source === "result_text" ? "result_text" : "buffered_text");
     for (const tc of parsed.toolCalls) tb.addToolCall(tc);
     recordToolCallParseOutcome(parsed, bridgeTools);
     recordUsageOnTrace(tb, result);
@@ -1307,18 +1659,28 @@ async function handleResponsesStreamJson(
     releaseSuccess(assistantForPool);
 
     if (stream && !res.writableEnded) {
+      if (!streamAssistantTextDeltas && emitInterimNarrationProgress && interimNarrationBuffer) {
+        const progress = createInterimNarrationProgressText(interimNarrationBuffer);
+        interimNarrationBuffer = "";
+        if (progress) writeTextDelta(progress, { assistantText: false });
+      }
+      if (!streamedAssistantText && parsed.textContent) {
+        writeTextDelta(parsed.textContent);
+      }
       const usage = chatUsageToResponsesUsage(resultUsageToOpenAI(result));
       const doneEvents = buildStreamDoneEvents(responseId, msgId, lastModel, parsed.textContent, usage, parsed.toolCalls);
       for (const evt of doneEvents) {
         const parsedEvt = JSON.parse(evt);
         res.write(`event: ${parsedEvt.type}\ndata: ${evt}\n\n`);
       }
+      res.write("data: [DONE]\n\n");
       res.end();
     } else if (!stream && !res.headersSent) {
       const chatResponse = cliResultToOpenai(resultForAdapters, requestId, chatReq);
       res.json(chatResponseToResponses(chatResponse, requestId));
     }
   } catch (error) {
+    if (watchdogFired || subprocessReleased) return;
     done = true;
     releaseDiscard("turn_error");
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -1331,8 +1693,14 @@ async function handleResponsesStreamJson(
       res.status(500).json({ error: { message, type: "server_error", code: null } });
     }
   } finally {
+    stopKeepalive();
+    stopWatchdog();
+    n8nDetector.detach();
+    phaseTracker.detach();
+    subprocess.off("intentional_wait", onIntentionalWait);
     subprocess.off("content_delta", onContentDelta);
     subprocess.off("assistant", onAssistant);
+    subprocess.off("message", onAnyClaudeEvent);
   }
 }
 
@@ -1484,6 +1852,7 @@ async function handleResponsesStreaming(
           const parsed = JSON.parse(evt);
           res.write(`event: ${parsed.type}\ndata: ${evt}\n\n`);
         }
+        res.write("data: [DONE]\n\n");
         res.end();
       }
       resolve();

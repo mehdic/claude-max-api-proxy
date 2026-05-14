@@ -53,6 +53,19 @@ test("external bridge disallows overlapping native MCP tool names", () => {
   assert.deepEqual(openaiToCli(req()).disallowedTools, disallowed);
 });
 
+test("external bridge can opt in to native MCP overlap for selected servers", () => {
+  const previous = process.env.CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS;
+  process.env.CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS = "n8n";
+  try {
+    const disallowed = externalNativeToolDisallowList(req());
+    assert.deepEqual(disallowed, ["n8n__n8n_list_workflows"]);
+    assert.match(toolDefsToPrompt(req()), /Native MCP overlap allowlist is active for: n8n/);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS;
+    else process.env.CLAUDE_PROXY_ALLOW_NATIVE_MCP_OVERLAPS = previous;
+  }
+});
+
 test("tool_choice none disables external bridge", () => {
   assert.equal(shouldBridgeExternalTools(req({ tool_choice: "none" })), false);
   assert.equal(messagesToPrompt(req({ tool_choice: "none" }).messages, req({ tool_choice: "none" })).includes("claude_proxy_openai_tools"), false);

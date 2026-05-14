@@ -107,8 +107,10 @@ curl -s http://127.0.0.1:3456/health
 Restart:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.claude-proxy
+/Users/mehdichaouachi/.openclaw/scripts/claude-proxy-safe-restart.sh
 ```
+
+Avoid bare `launchctl kickstart -k` after plist or environment changes: it can restart the stale loaded job definition. The safe wrapper reloads the plist from disk first and verifies the live env.
 
 Unload:
 
